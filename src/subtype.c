@@ -2869,6 +2869,135 @@ static int check_unsat_bound(jl_value_t *t, jl_tvar_t *v, jl_stenv_t *e) JL_NOTS
 
 static int intersect_var_ccheck_in_env(jl_value_t *xlb, jl_value_t *xub, jl_value_t *ylb, jl_value_t *yub, jl_stenv_t *e, int flip);
 
+// Implement covariant intersection of an in-env typevar `b` with value `a`, given
+// a precomputed upper bound `ub` (the meet of `b.ub` and `a` / `a.ub`).
+// We construct a fresh innervar `N` with `N.ub = ub`, push it onto the outer
+// varbinding's innervar list (so it survives until that UnionAll is popped),
+// and union `N` into `b.lb` (and into `a.lb` if `a` is also an in-env typevar).
+// The result is `N`, which will substitute for `b` at the call site while
+// preserving the typevar identities so the diagonal rule can fire later.
+// TODO: track a diagonal flag on `N` so the diagonal rule can later force
+// equality between innervars that occur together in some `vb->lb`.
+// Recursively rewrite covariant positions in `a` that are in-env typevars,
+// replacing each typevar `T` with a fresh innervar `Z` (Z.ub = T's resolved
+// ub). Each `Z` is pushed onto the outer-of-(bb, T's binding)'s innervar list
+// and `T.lb` is unioned with `Z`; we also record a covariant occurrence on T
+// so its diagonal counter increments. Returns the rewritten type, or `a`
+// unchanged if no rewrite happens.
+static jl_value_t *structural_innervars(jl_value_t *a, jl_varbinding_t *bb, jl_stenv_t *e, jl_param_pos_t param)
+{
+    if (jl_is_typevar(a) && param == PARAM_COVARIANT) {
+        jl_varbinding_t *aa = lookup(e, (jl_tvar_t*)a);
+        if (aa == NULL || aa == bb) return a;
+        jl_varbinding_t *outer_vb = bb;
+        jl_varbinding_t *t = e->vars;
+        while (t != NULL) {
+            if (t == bb) { outer_vb = aa; break; }
+            if (t == aa) { outer_vb = bb; break; }
+            t = t->prev;
+        }
+        jl_value_t *ntv_ub = aa->ub;
+        while (jl_is_typevar(ntv_ub)) {
+            jl_varbinding_t *vbu = lookup(e, (jl_tvar_t*)ntv_ub);
+            if (vbu == NULL || vbu->ub == ntv_ub) break;
+            ntv_ub = vbu->ub;
+        }
+        jl_value_t *ntv = NULL, *new_lb = NULL;
+        JL_GC_PUSH2(&ntv, &new_lb);
+        ntv = (jl_value_t*)jl_new_typevar(((jl_tvar_t*)a)->name, jl_bottom_type, ntv_ub);
+        if (outer_vb->innervars == NULL)
+            outer_vb->innervars = jl_alloc_array_1d(jl_array_any_type, 0);
+        jl_array_ptr_1d_push(outer_vb->innervars, ntv);
+        new_lb = simple_join(aa->lb, ntv);
+        set_bound(&aa->lb, new_lb, (jl_tvar_t*)a, e);
+        record_var_occurrence(aa, e, PARAM_COVARIANT);
+        JL_GC_POP();
+        return ntv;
+    }
+    if (jl_is_datatype(a) && jl_has_free_typevars(a) && jl_is_tuple_type(a)) {
+        size_t np = jl_nparams(a);
+        if (np == 0) return a;
+        jl_value_t **newparams;
+        JL_GC_PUSHARGS(newparams, np);
+        int changed = 0;
+        for (size_t i = 0; i < np; i++) {
+            jl_value_t *pi = jl_tparam(a, i);
+            if (jl_is_vararg(pi)) {
+                newparams[i] = pi;
+            }
+            else {
+                newparams[i] = structural_innervars(pi, bb, e, PARAM_COVARIANT);
+                if (newparams[i] != pi) changed = 1;
+            }
+        }
+        if (!changed) {
+            JL_GC_POP();
+            return a;
+        }
+        jl_value_t *new_t = a;
+        JL_TRY {
+            new_t = jl_apply_tuple_type_v(newparams, np);
+        }
+        JL_CATCH {
+            new_t = a;
+        }
+        JL_GC_POP();
+        return new_t;
+    }
+    return a;
+}
+
+static jl_value_t *intersect_covariant_var(jl_tvar_t *b, jl_varbinding_t *bb, jl_value_t *a, jl_value_t *ub, jl_stenv_t *e)
+{
+    assert(bb != NULL);
+    assert(ub != jl_bottom_type);
+    jl_varbinding_t *outer_vb = bb;
+    jl_varbinding_t *aa = NULL;
+    if (jl_is_typevar(a)) {
+        aa = lookup(e, (jl_tvar_t*)a);
+        if (aa) {
+            // Walk env from inner (top of list) outward; the first one we hit is INNER.
+            // Store the innervar with the OUTER var so it survives until that var is popped.
+            jl_varbinding_t *t = e->vars;
+            while (t != NULL) {
+                if (t == bb) { outer_vb = aa; break; }
+                if (t == aa) { outer_vb = bb; break; }
+                t = t->prev;
+            }
+        }
+    }
+    // Resolve the new innervar's ub to a non-typevar form when possible: if `a`
+    // is an in-env typevar, use its current effective `ub` (recursively). This
+    // avoids creating a circular constraint chain `b.lb = M, M.ub = a, a.lb = M`
+    // which would trip `reachable_var`'s short-circuit in subsequent calls,
+    // returning wider results than warranted.
+    jl_value_t *ntv_ub = ub;
+    while (jl_is_typevar(ntv_ub)) {
+        jl_varbinding_t *vbu = lookup(e, (jl_tvar_t*)ntv_ub);
+        if (vbu == NULL || vbu->ub == ntv_ub) break;
+        ntv_ub = vbu->ub;
+    }
+    jl_value_t *ntv = NULL, *new_lb = NULL;
+    JL_GC_PUSH2(&ntv, &new_lb);
+    ntv = (jl_value_t*)jl_new_typevar(b->name, jl_bottom_type, ntv_ub);
+    if (outer_vb->innervars == NULL)
+        outer_vb->innervars = jl_alloc_array_1d(jl_array_any_type, 0);
+    jl_array_ptr_1d_push(outer_vb->innervars, ntv);
+    new_lb = simple_join(bb->lb, ntv);
+    set_bound(&bb->lb, new_lb, b, e);
+    // Also narrow bb->ub to record the constraint for subsequent intersections.
+    // Without this, future intersections on `b` would see `bb->ub` as its
+    // initial wide value and could miss conflicts (e.g. when a subsequent
+    // covariant intersection demands a leaf type that is disjoint from `ub`).
+    set_bound(&bb->ub, ntv_ub, b, e);
+    if (aa) {
+        new_lb = simple_join(aa->lb, ntv);
+        set_bound(&aa->lb, new_lb, (jl_tvar_t*)a, e);
+    }
+    JL_GC_POP();
+    return ntv;
+}
+
 static jl_value_t *intersect_var(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int8_t R, jl_param_pos_t param)
 {
     jl_varbinding_t *bb = lookup(e, b);
@@ -2940,6 +3069,34 @@ static jl_value_t *intersect_var(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int
     }
     if (bb->constraintkind == 1) {
         if (!jl_is_type_type(ub) && !jl_is_uniontype(ub) && !jl_is_unionall(ub)) {
+            // For typevar∩typevar covariant, prefer the innervar approach so
+            // diagonal narrowing can be deferred until the enclosing UnionAll
+            // is popped (see `intersect_covariant_var`). For non-typevar `a`,
+            // the existing narrowing of `bb->ub` is both adequate and tighter.
+            if (param == PARAM_COVARIANT && jl_is_typevar(a) && lookup(e, (jl_tvar_t*)a) != NULL) {
+                JL_GC_PUSH1(&ub);
+                jl_value_t *r = intersect_covariant_var(b, bb, a, ub, e);
+                JL_GC_POP();
+                return r;
+            }
+            // For typevar∩structural-with-free-tvars in covariant position,
+            // descend through the structural form and replace each free
+            // in-env typevar with a fresh innervar (Tuple{T3} ⇒ Tuple{Z}).
+            // This preserves the typevar identity link via the innervar so
+            // later diagonal narrowing can fire correctly.
+            if (param == PARAM_COVARIANT && jl_is_tuple_type(ub) && jl_has_free_typevars(ub)) {
+                jl_value_t *rewritten = NULL, *new_lb = NULL;
+                JL_GC_PUSH3(&ub, &rewritten, &new_lb);
+                rewritten = structural_innervars(ub, bb, e, PARAM_COVARIANT);
+                if (rewritten != ub) {
+                    new_lb = simple_join(bb->lb, rewritten);
+                    set_bound(&bb->lb, new_lb, b, e);
+                    set_bound(&bb->ub, ub, b, e);
+                    JL_GC_POP();
+                    return rewritten;
+                }
+                JL_GC_POP();
+            }
             // this branch is a fast path if there are no `Type`s and not needed for correctness
             set_bound(&bb->ub, ub, b, e);
             return (jl_value_t*)b;
@@ -3505,6 +3662,112 @@ static jl_value_t *intersect_unionall_(jl_value_t *t, jl_unionall_t *u, jl_stenv
     //  ( Tuple{Int, Int}    <: Tuple{T, T} where T) but
     // !( Tuple{Int, String} <: Tuple{T, T} where T)
     // Then check concreteness by checking that the lower bound is not an abstract type.
+    if (res != jl_bottom_type && vb->concrete && (jl_is_uniontype(vb->lb) || jl_is_typevar(vb->lb))) {
+        JL_GC_PUSH1(&res);
+        // If vb's lb is a typevar or a Union of typevars (innervars accumulated
+        // from a sequence of covariant intersections via `intersect_covariant_var`),
+        // the diagonal rule forces all those typevars to be equal AND also forces
+        // `vb->var` itself to be equal to them. We pick the earliest-encountered
+        // typevar in `vb->lb` as canonical, tighten its `ub` to the meet of the
+        // involved `ub`s (sound since they are forced equal), and substitute the
+        // others (and `vb->var` itself, when it occurs in `res`) with the
+        // canonical typevar.
+        // TODO: track a diagonal flag on the innervars so each can be marked
+        // diagonal individually (currently the diagonal rule only fires on the
+        // outer var).
+        jl_tvar_t *canonical = NULL;
+        int unifiable = 1;
+        jl_value_t *stack[16];
+        int sp = 0;
+        stack[sp++] = vb->lb;
+        while (sp > 0 && unifiable) {
+            jl_value_t *cur = stack[--sp];
+            if (jl_is_uniontype(cur)) {
+                if (sp + 2 > 16) { unifiable = 0; break; }
+                stack[sp++] = ((jl_uniontype_t*)cur)->b;
+                stack[sp++] = ((jl_uniontype_t*)cur)->a;
+            }
+            else if (jl_is_typevar(cur)) {
+                if (canonical == NULL)
+                    canonical = (jl_tvar_t*)cur;
+            }
+            else {
+                unifiable = 0;
+            }
+        }
+        if (unifiable && canonical != NULL) {
+            // Compute the meet of resolved upper bounds across all the typevars
+            // forced equal. The diagonal rule says they must all hold a single
+            // common value, so the effective bound is the meet of the witnesses'
+            // upper bounds (and vb's ub). We only mutate `canonical->ub` if the
+            // new bound has no free typevars, to keep `finish_unionall`'s sort
+            // step terminating (it relies on `jl_has_free_typevars` walks that
+            // would otherwise see cycles via typevar binding chains).
+            jl_value_t *meet_ub = canonical->ub;
+            JL_GC_PUSH1(&meet_ub);
+            while (jl_is_typevar(meet_ub)) {
+                jl_varbinding_t *vbu = lookup(e, (jl_tvar_t*)meet_ub);
+                if (vbu == NULL || vbu->ub == meet_ub) break;
+                meet_ub = vbu->ub;
+            }
+            sp = 0;
+            stack[sp++] = vb->lb;
+            while (sp > 0) {
+                jl_value_t *cur = stack[--sp];
+                if (jl_is_uniontype(cur)) {
+                    stack[sp++] = ((jl_uniontype_t*)cur)->b;
+                    stack[sp++] = ((jl_uniontype_t*)cur)->a;
+                }
+                else if (jl_is_typevar(cur) && (jl_tvar_t*)cur != canonical) {
+                    jl_tvar_t *t = (jl_tvar_t*)cur;
+                    jl_value_t *tu = t->ub;
+                    while (jl_is_typevar(tu)) {
+                        jl_varbinding_t *tb = lookup(e, (jl_tvar_t*)tu);
+                        if (tb == NULL || tb->ub == tu) break;
+                        tu = tb->ub;
+                    }
+                    if (meet_ub == (jl_value_t*)jl_any_type) meet_ub = tu;
+                    else if (tu == (jl_value_t*)jl_any_type) ; // keep meet_ub
+                    else if (!obviously_egal(meet_ub, tu))
+                        meet_ub = simple_meet(meet_ub, tu, 1);
+                    if (meet_ub == jl_bottom_type) {
+                        res = jl_bottom_type;
+                        unifiable = 0;
+                        break;
+                    }
+                    res = jl_substitute_var(res, t, (jl_value_t*)canonical);
+                }
+            }
+            // Tighten against vb->ub.
+            if (res != jl_bottom_type) {
+                jl_value_t *tu = vb->ub;
+                while (jl_is_typevar(tu)) {
+                    jl_varbinding_t *tb = lookup(e, (jl_tvar_t*)tu);
+                    if (tb == NULL || tb->ub == tu) break;
+                    tu = tb->ub;
+                }
+                if (meet_ub == (jl_value_t*)jl_any_type) meet_ub = tu;
+                else if (tu == (jl_value_t*)jl_any_type) ;
+                else if (!obviously_egal(meet_ub, tu))
+                    meet_ub = simple_meet(meet_ub, tu, 1);
+                if (meet_ub == jl_bottom_type)
+                    res = jl_bottom_type;
+            }
+            // Mutate canonical's ub only if the new bound is free of typevars,
+            // to avoid creating cycles that confuse the sort step in
+            // `finish_unionall`.
+            if (res != jl_bottom_type && meet_ub != canonical->ub &&
+                !jl_has_free_typevars(meet_ub))
+                canonical->ub = meet_ub;
+            // Collapse `vb->var` itself onto canonical when it occurs in `res`
+            // (e.g. from a non-innervar covariant intersection path).
+            if (res != jl_bottom_type && jl_has_typevar(res, vb->var))
+                res = jl_substitute_var(res, vb->var, (jl_value_t*)canonical);
+            vb->lb = (jl_value_t*)canonical;
+            JL_GC_POP();
+        }
+        JL_GC_POP();
+    }
     if (res != jl_bottom_type && vb->concrete) {
         if (jl_is_typevar(vb->lb)) {
         }

@@ -1237,11 +1237,11 @@ let a = Tuple{Float64,T3,T4} where T4 where T3,
     b = Tuple{S2,Tuple{S3},S3} where S2 where S3
     I1 = typeintersect(a, b)
     I2 = typeintersect(b, a)
-    @test_broken I1 <: I2
+    @test I1 <: I2
     @test I2 <: I1
     @test I1 <: a
     @test I2 <: a
-    @test_broken I1 <: b
+    @test I1 <: b
     @test I2 <: b
 end
 let a = Tuple{T1,Tuple{T1}} where T1,
@@ -1259,11 +1259,11 @@ let a = Tuple{5,T4,T5} where T4 where T5,
     b = Tuple{S2,S3,Tuple{S3}} where S2 where S3
     I1 = typeintersect(a, b)
     I2 = typeintersect(b, a)
-    @test_broken I1 <: I2
+    @test I1 <: I2
     @test I2 <: I1
     @test I1 <: a
     @test I2 <: a
-    @test_broken I1 <: b
+    @test I1 <: b
     @test I2 <: b
 end
 let a = Tuple{T2,Tuple{T4,T2}} where T4 where T2,
@@ -1274,11 +1274,11 @@ let a = Tuple{Tuple{T2,4},T6} where T2 where T6,
     b = Tuple{Tuple{S2,S3},Tuple{S2}} where S2 where S3
     I1 = typeintersect(a, b)
     I2 = typeintersect(b, a)
-    @test_broken I1 <: I2
+    @test I1 <: I2
     @test I2 <: I1
     @test I1 <: a
     @test I2 <: a
-    @test_broken I1 <: b
+    @test I1 <: b
     @test I2 <: b
 end
 let a = Tuple{T3,Int64,Tuple{T3}} where T3,
@@ -1333,8 +1333,8 @@ let a = Tuple{T1,T2,T2} where T1 where T2,
     @test I2 <: I1
     @test I1 <: a
     @test I2 <: a
-    @test_broken I1 <: b
-    @test_broken I2 <: b
+    @test I1 <: b
+    @test I2 <: b
 end
 @testintersect(Val{Tuple{T1,Val{T2},Val{Int64},Tuple{Tuple{T3,5,Float64},T4,T2,T5}}} where T1 where T5 where T4 where T3 where T2,
                Val{Tuple{Tuple{S1,5,Float64},Val{S2},S3,Tuple{Tuple{Val{Float64},5,Float64},2,Float64,S4}}} where S2 where S3 where S1 where S4,
@@ -2524,6 +2524,12 @@ let T = Ref{NTuple{8, Ref{Union{Int, P}}}} where P,
     # note T and S are identical but we need 2 copies to avoid being fooled by pointer equality
     @test T <: Union{Int, S}
 end
+
+# issue #61773 (dual diagonal): typeintersect was order-dependent and exploded
+# into a 16-element Union for the original reproducer.
+@testintersect(Tuple{A, A, B} where {A, B<:A},
+               Tuple{Int, C, C} where C,
+               Tuple{Int, Int, Int})
 
 # issue #61602
 struct W61602{T, N} x::Array{T, N} end
