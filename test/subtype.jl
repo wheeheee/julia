@@ -2527,6 +2527,22 @@ end
 
 # issue #61773 (dual diagonal): typeintersect was order-dependent and exploded
 # into a 16-element Union for the original reproducer.
+function test_diagonal_intersection_witnesses(@nospecialize(A), @nospecialize(B),
+                                              @nospecialize(expected), witnesses...)
+    @testintersect(A, B, expected)
+    I1 = typeintersect(A, B)
+    I2 = typeintersect(B, A)
+    for X in witnesses
+        @test X <: A && X <: B
+        @test X <: I1
+        @test X <: I2
+    end
+    @test I1 <: A
+    @test I1 <: B
+    @test I2 <: A
+    @test I2 <: B
+end
+
 @testintersect(Tuple{A, A, B} where {A, B<:A},
                Tuple{Int, C, C} where C,
                Tuple{Int, Int, Int})
@@ -2535,30 +2551,28 @@ end
                Tuple{Tuple{Int}, Tuple{Int}, Tuple{Int}})
 # Repeated diagonal occurrences must unify structural witnesses with free variables.
 struct Box61787{T} end
-let A = Tuple{T, T} where T,
-    B = Tuple{Box61787{S}, Box61787{R}} where {S, R},
-    X = Tuple{Box61787{Real}, Box61787{Real}}
-    I1 = typeintersect(A, B)
-    I2 = typeintersect(B, A)
-    @test X <: A
-    @test X <: B
-    @test X <: I1
-    @test X <: I2
-end
-let A = Tuple{T, T} where T,
-    B = Tuple{Tuple{S}, Tuple{R}} where {S, R},
-    X = Tuple{Tuple{Int}, Tuple{Int}}
-    I1 = typeintersect(A, B)
-    I2 = typeintersect(B, A)
-    @test X <: A
-    @test X <: B
-    @test X <: I1
-    @test X <: I2
-    @test I1 <: A
-    @test I1 <: B
-    @test I2 <: A
-    @test I2 <: B
-end
+test_diagonal_intersection_witnesses(
+    Tuple{T, T} where T,
+    Tuple{Box61787{S}, Box61787{R}} where {S, R},
+    Tuple{T, T} where {S, T<:Box61787{S}},
+    Tuple{Box61787{Real}, Box61787{Real}})
+test_diagonal_intersection_witnesses(
+    Tuple{Union{T, Int}, T} where T,
+    Tuple{C, C} where C,
+    Tuple{C, C} where C,
+    Tuple{String, String},
+    Tuple{Int, Int})
+test_diagonal_intersection_witnesses(
+    Tuple{T, T} where T,
+    Tuple{Tuple{S}, Tuple{R}} where {S, R},
+    Tuple{T, T} where {S, T<:Tuple{S}},
+    Tuple{Tuple{Int}, Tuple{Int}})
+struct Box61787B{T} end
+test_diagonal_intersection_witnesses(
+    Tuple{Box61787B{S}, Box61787B{R}} where {S, R},
+    Tuple{C, C} where C,
+    Tuple{C, C} where {S, C<:Box61787B{S}},
+    Tuple{Box61787B{Real}, Box61787B{Real}})
 # Diagonal witness collection must handle an arbitrary number of occurrences.
 let n = 17
     A = TypeVar(:A, Bottom, Tuple)
@@ -2567,8 +2581,7 @@ let n = 17
     left = UnionAll(A, UnionAll(B, Tuple{ntuple(_ -> A, n)..., B}))
     right = UnionAll(C, Tuple{Tuple{Int}, ntuple(_ -> C, n)...})
     expected = Tuple{ntuple(_ -> Tuple{Int}, n + 1)...}
-    @test _type_intersect(left, right) == expected
-    @test _type_intersect(right, left) == expected
+    @testintersect(left, right, expected)
 end
 
 # Covariant intersection must use the effective upper bound through chains of typevars.

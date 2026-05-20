@@ -2923,6 +2923,36 @@ static jl_value_t *resolve_env_ub(jl_value_t *ub, jl_stenv_t *e) JL_NOTSAFEPOINT
     return ub;
 }
 
+static jl_value_t *effective_typevar_ub(jl_tvar_t *v, jl_stenv_t *e) JL_NOTSAFEPOINT
+{
+    jl_varbinding_t *vb = lookup(e, v);
+    return resolve_env_ub(vb ? vb->ub : v->ub, e);
+}
+
+static void set_diagonal_typevar_ub(jl_tvar_t *v, jl_value_t *ub, jl_stenv_t *e) JL_NOTSAFEPOINT
+{
+    jl_varbinding_t *vb = lookup(e, v);
+    if (vb) {
+        set_bound(&vb->ub, ub, v, e);
+        return;
+    }
+    assert(!jl_has_typevar(ub, v));
+    v->ub = ub;
+}
+
+static void set_diagonal_typevar_equal(jl_tvar_t *v, jl_value_t *val, jl_stenv_t *e) JL_NOTSAFEPOINT
+{
+    jl_varbinding_t *vb = lookup(e, v);
+    if (vb) {
+        vb->lb = val;
+        vb->ub = val;
+        return;
+    }
+    assert(!jl_has_typevar(val, v));
+    v->lb = val;
+    v->ub = val;
+}
+
 static void substitute_var_in_env(jl_stenv_t *e, jl_tvar_t *old, jl_value_t *newv)
 {
     jl_value_t *oldv = (jl_value_t*)old, *newv_root = newv;
@@ -2993,18 +3023,18 @@ static jl_value_t *diagonal_witness_meet(jl_value_t *a, jl_value_t *b, jl_stenv_
     if (jl_is_typevar(a) && jl_is_typevar(b)) {
         jl_value_t *aub = NULL, *bub = NULL, *ub = NULL;
         JL_GC_PUSH3(&aub, &bub, &ub);
-        aub = resolve_env_ub(((jl_tvar_t*)a)->ub, e);
-        bub = resolve_env_ub(((jl_tvar_t*)b)->ub, e);
+        aub = effective_typevar_ub((jl_tvar_t*)a, e);
+        bub = effective_typevar_ub((jl_tvar_t*)b, e);
         ub = diagonal_bound_meet(aub, bub);
-        if (ub != jl_bottom_type && ub != ((jl_tvar_t*)a)->ub && !jl_has_free_typevars(ub))
-            ((jl_tvar_t*)a)->ub = ub;
+        if (ub != jl_bottom_type && ub != aub && !jl_has_free_typevars(ub))
+            set_diagonal_typevar_ub((jl_tvar_t*)a, ub, e);
         JL_GC_POP();
         return ub == jl_bottom_type ? jl_bottom_type : a;
     }
     if (jl_is_typevar(a)) {
         jl_value_t *ub = NULL, *ret = NULL;
         JL_GC_PUSH2(&ub, &ret);
-        ub = resolve_env_ub(((jl_tvar_t*)a)->ub, e);
+        ub = effective_typevar_ub((jl_tvar_t*)a, e);
         ret = (ub == (jl_value_t*)a || ub == (jl_value_t*)jl_any_type) ? b :
             diagonal_witness_meet(ub, b, e);
         JL_GC_POP();
@@ -3013,7 +3043,7 @@ static jl_value_t *diagonal_witness_meet(jl_value_t *a, jl_value_t *b, jl_stenv_
     if (jl_is_typevar(b)) {
         jl_value_t *ub = NULL, *ret = NULL;
         JL_GC_PUSH2(&ub, &ret);
-        ub = resolve_env_ub(((jl_tvar_t*)b)->ub, e);
+        ub = effective_typevar_ub((jl_tvar_t*)b, e);
         ret = (ub == (jl_value_t*)b || ub == (jl_value_t*)jl_any_type) ? a :
             diagonal_witness_meet(a, ub, e);
         JL_GC_POP();
@@ -3061,7 +3091,7 @@ static jl_value_t *diagonal_witness_meet(jl_value_t *a, jl_value_t *b, jl_stenv_
 static jl_value_t *diagonal_witness_ub(jl_value_t *witness, jl_stenv_t *e) JL_NOTSAFEPOINT
 {
     if (jl_is_typevar(witness))
-        return resolve_env_ub(((jl_tvar_t*)witness)->ub, e);
+        return effective_typevar_ub((jl_tvar_t*)witness, e);
     return witness;
 }
 
@@ -3120,8 +3150,7 @@ static void substitute_diagonal_witness(jl_value_t **res, jl_value_t **lb, jl_va
     if (jl_has_typevar(*ub, oldtv))
         *ub = jl_substitute_var(*ub, oldtv, newv);
     substitute_var_in_env(e, oldtv, newv);
-    oldtv->lb = newv;
-    oldtv->ub = newv;
+    set_diagonal_typevar_equal(oldtv, newv, e);
 }
 
 static void unify_diagonal_witness(jl_value_t **res, jl_value_t **lb, jl_value_t **ub,
@@ -3959,7 +3988,7 @@ static jl_value_t *intersect_unionall_(jl_value_t *t, jl_unionall_t *u, jl_stenv
                 if (jl_is_typevar(common)) {
                     jl_tvar_t *common_var = (jl_tvar_t*)common;
                     if (!has_typevar_via_bounds(common_ub, common_var, e, NULL))
-                        set_bound(&common_var->ub, common_ub, common_var, e);
+                        set_diagonal_typevar_ub(common_var, common_ub, e);
                 }
                 common = diagonal_leaf_witness(common, e);
                 for (size_t i = 0; i < nwitnesses; i++)
