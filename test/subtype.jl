@@ -2530,6 +2530,14 @@ end
 @testintersect(Tuple{A, A, B} where {A, B<:A},
                Tuple{Int, C, C} where C,
                Tuple{Int, Int, Int})
+@testintersect(Tuple{A, A, B} where {A<:Tuple, B<:A},
+               Tuple{Tuple{Int}, C, C} where C,
+               Tuple{Tuple{Int}, Tuple{Int}, Tuple{Int}})
+
+# Covariant intersection must use the effective upper bound through chains of typevars.
+@testintersect(Tuple{Union{Signed, Tuple{Any}}},
+               Tuple{T3} where {T1<:Real, T2<:T1, T3<:T2},
+               Tuple{T} where T<:Signed)
 
 # issue #61602
 struct W61602{T, N} x::Array{T, N} end
@@ -2545,7 +2553,7 @@ let A = W61602{T, 1} where T<:(Union{Missing, S} where S),
     @test !(Tuple{C, String} <: E)
     @test Tuple{C, Int64} <: typeintersect(D, E)
     @test Tuple{C, Int64} <: typeintersect(E, D)
-    @test_broken !(Tuple{C, String} <: typeintersect(D, E))
+    @test !(Tuple{C, String} <: typeintersect(D, E))
     @test_broken !(Tuple{C, String} <: typeintersect(E, D))
 end
 
