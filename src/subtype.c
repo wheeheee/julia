@@ -2851,6 +2851,48 @@ static int reachable_var(jl_value_t *x, jl_tvar_t *y, jl_stenv_t *e)
     return _reachable_var(x, y, e, NULL);
 }
 
+static int has_typevar_via_bounds(jl_value_t *x, jl_tvar_t *y, jl_stenv_t *e, jl_typeenv_t *log) JL_NOTSAFEPOINT
+{
+    if (x == (jl_value_t*)y)
+        return 1;
+    if (jl_is_uniontype(x)) {
+        return has_typevar_via_bounds(((jl_uniontype_t*)x)->a, y, e, log) ||
+               has_typevar_via_bounds(((jl_uniontype_t*)x)->b, y, e, log);
+    }
+    if (jl_is_unionall(x)) {
+        jl_unionall_t *ua = (jl_unionall_t*)x;
+        return has_typevar_via_bounds(ua->var->lb, y, e, log) ||
+               has_typevar_via_bounds(ua->var->ub, y, e, log) ||
+               has_typevar_via_bounds(ua->body, y, e, log);
+    }
+    if (jl_is_vararg(x)) {
+        jl_vararg_t *vm = (jl_vararg_t*)x;
+        return (vm->T && has_typevar_via_bounds(vm->T, y, e, log)) ||
+               (vm->N && has_typevar_via_bounds(vm->N, y, e, log));
+    }
+    if (jl_is_datatype(x)) {
+        for (size_t i = 0; i < jl_nparams(x); i++) {
+            if (has_typevar_via_bounds(jl_tparam(x, i), y, e, log))
+                return 1;
+        }
+        return 0;
+    }
+    if (!jl_is_typevar(x))
+        return 0;
+    jl_typeenv_t *t = log;
+    while (t != NULL) {
+        if (x == (jl_value_t*)t->var)
+            return 0;
+        t = t->prev;
+    }
+    jl_varbinding_t *xv = lookup(e, (jl_tvar_t*)x);
+    if (xv == NULL)
+        return 0;
+    jl_typeenv_t newlog = { (jl_tvar_t*)x, NULL, log };
+    return has_typevar_via_bounds(xv->lb, y, e, &newlog) ||
+           has_typevar_via_bounds(xv->ub, y, e, &newlog);
+}
+
 // check whether setting v == t implies v == SomeType{v}, which is unsatisfiable.
 static int check_unsat_bound(jl_value_t *t, jl_tvar_t *v, jl_stenv_t *e) JL_NOTSAFEPOINT
 {
@@ -2916,16 +2958,23 @@ static void substitute_var_in_env(jl_stenv_t *e, jl_tvar_t *old, jl_value_t *new
     JL_GC_POP();
 }
 
-static int collect_diagonal_witnesses(jl_value_t *v, jl_value_t **witnesses, size_t *nwitnesses, size_t maxwitnesses) JL_NOTSAFEPOINT
+static size_t count_diagonal_witnesses(jl_value_t *v) JL_NOTSAFEPOINT
 {
     if (jl_is_uniontype(v)) {
-        return collect_diagonal_witnesses(((jl_uniontype_t*)v)->a, witnesses, nwitnesses, maxwitnesses) &&
-               collect_diagonal_witnesses(((jl_uniontype_t*)v)->b, witnesses, nwitnesses, maxwitnesses);
+        return count_diagonal_witnesses(((jl_uniontype_t*)v)->a) +
+               count_diagonal_witnesses(((jl_uniontype_t*)v)->b);
     }
-    if (*nwitnesses >= maxwitnesses)
-        return 0;
-    witnesses[(*nwitnesses)++] = v;
     return 1;
+}
+
+static void collect_diagonal_witnesses(jl_value_t *v, jl_value_t **witnesses, size_t *nwitnesses) JL_NOTSAFEPOINT
+{
+    if (jl_is_uniontype(v)) {
+        collect_diagonal_witnesses(((jl_uniontype_t*)v)->a, witnesses, nwitnesses);
+        collect_diagonal_witnesses(((jl_uniontype_t*)v)->b, witnesses, nwitnesses);
+        return;
+    }
+    witnesses[(*nwitnesses)++] = v;
 }
 
 static jl_value_t *diagonal_bound_meet(jl_value_t *a, jl_value_t *b)
@@ -3009,27 +3058,11 @@ static jl_value_t *diagonal_witness_meet(jl_value_t *a, jl_value_t *b, jl_stenv_
     return diagonal_bound_meet(a, b);
 }
 
-static jl_value_t *diagonal_witness_bound_meet(jl_value_t *witness, jl_value_t *bound, jl_stenv_t *e)
+static jl_value_t *diagonal_witness_ub(jl_value_t *witness, jl_stenv_t *e) JL_NOTSAFEPOINT
 {
-    // A declared upper bound constrains a single diagonal witness, but should
-    // not replace a typevar witness with an abstract bound such as Any.
-    jl_value_t *ub = NULL, *meet = NULL, *ret = witness;
-    JL_GC_PUSH4(&witness, &bound, &ub, &meet);
-    if (bound == (jl_value_t*)jl_any_type || obviously_egal(witness, bound)) {
-        ret = witness;
-    }
-    else if (jl_is_typevar(witness)) {
-        ub = resolve_env_ub(((jl_tvar_t*)witness)->ub, e);
-        meet = diagonal_bound_meet(ub, bound);
-        if (meet != jl_bottom_type && meet != ub && !jl_has_free_typevars(meet))
-            ((jl_tvar_t*)witness)->ub = meet;
-        ret = meet == jl_bottom_type ? jl_bottom_type : witness;
-    }
-    else {
-        ret = diagonal_witness_meet(witness, bound, e);
-    }
-    JL_GC_POP();
-    return ret;
+    if (jl_is_typevar(witness))
+        return resolve_env_ub(((jl_tvar_t*)witness)->ub, e);
+    return witness;
 }
 
 static jl_value_t *diagonal_leaf_witness(jl_value_t *v, jl_stenv_t *e)
@@ -3073,9 +3106,13 @@ static jl_value_t *diagonal_leaf_witness(jl_value_t *v, jl_stenv_t *e)
 static void substitute_diagonal_witness(jl_value_t **res, jl_value_t **lb, jl_value_t **ub,
                                         jl_value_t *oldv, jl_value_t *newv, jl_stenv_t *e)
 {
-    if (oldv == newv || !jl_is_typevar(oldv) || jl_has_typevar(newv, (jl_tvar_t*)oldv))
+    if (oldv == newv || !jl_is_typevar(oldv))
         return;
     jl_tvar_t *oldtv = (jl_tvar_t*)oldv;
+    if (jl_has_typevar(newv, oldtv)) {
+        *res = jl_bottom_type;
+        return;
+    }
     if (jl_has_typevar(*res, oldtv))
         *res = jl_substitute_var(*res, oldtv, newv);
     if (jl_has_typevar(*lb, oldtv))
@@ -3113,15 +3150,6 @@ static void unify_diagonal_witness(jl_value_t **res, jl_value_t **lb, jl_value_t
     }
 }
 
-// Implement covariant intersection of an in-env typevar `b` with value `a`, given
-// a precomputed upper bound `ub` (the meet of `b.ub` and `a` / `a.ub`).
-// We construct a fresh innervar `N` with `N.ub = ub`, push it onto the outer
-// varbinding's innervar list (so it survives until that UnionAll is popped),
-// and union `N` into `b.lb` (and into `a.lb` if `a` is also an in-env typevar).
-// The result is `N`, which will substitute for `b` at the call site while
-// preserving the typevar identities so the diagonal rule can fire later.
-// TODO: track a diagonal flag on `N` so the diagonal rule can later force
-// equality between innervars that occur together in some `vb->lb`.
 // Recursively rewrite covariant positions in `a` that are in-env typevars,
 // replacing each typevar `T` with a fresh innervar `Z` (Z.ub = T's resolved
 // ub). Each `Z` is pushed onto the outer-of-(bb, T's binding)'s innervar list
@@ -3186,6 +3214,11 @@ static jl_value_t *structural_innervars(jl_value_t *a, jl_varbinding_t *bb, jl_s
     return a;
 }
 
+// Implement covariant intersection of an in-env typevar `b` with value `a`, given
+// a precomputed upper bound `ub` (the meet of `b.ub` and `a` / `a.ub`).
+// A concrete covariant occurrence contributes a fresh witness `N <: ub`.
+// The diagonal pop later unifies all witnesses from repeated occurrences by
+// choosing one canonical witness and meeting their upper bounds.
 static jl_value_t *intersect_covariant_var(jl_tvar_t *b, jl_varbinding_t *bb, jl_value_t *a, jl_value_t *ub, jl_stenv_t *e)
 {
     assert(bb != NULL);
@@ -3205,14 +3238,9 @@ static jl_value_t *intersect_covariant_var(jl_tvar_t *b, jl_varbinding_t *bb, jl
             }
         }
     }
-    // Resolve the new innervar's ub to a non-typevar form when possible: if `a`
-    // is an in-env typevar, use its current effective `ub` (recursively). This
-    // avoids creating a circular constraint chain `b.lb = M, M.ub = a, a.lb = M`
-    // which would trip `reachable_var`'s short-circuit in subsequent calls,
-    // returning wider results than warranted.
     jl_value_t *ntv_ub = NULL, *ntv = NULL, *new_lb = NULL;
     JL_GC_PUSH3(&ntv_ub, &ntv, &new_lb);
-    ntv_ub = resolve_env_ub(ub, e);
+    ntv_ub = ub;
     ntv = (jl_value_t*)jl_new_typevar(b->name, jl_bottom_type, ntv_ub);
     if (outer_vb->innervars == NULL)
         outer_vb->innervars = jl_alloc_array_1d(jl_array_any_type, 0);
@@ -3224,10 +3252,6 @@ static jl_value_t *intersect_covariant_var(jl_tvar_t *b, jl_varbinding_t *bb, jl
     // initial wide value and could miss conflicts (e.g. when a subsequent
     // covariant intersection demands a leaf type that is disjoint from `ub`).
     set_bound(&bb->ub, ntv_ub, b, e);
-    if (aa) {
-        new_lb = simple_join(aa->lb, ntv);
-        set_bound(&aa->lb, new_lb, (jl_tvar_t*)a, e);
-    }
     JL_GC_POP();
     return ntv;
 }
@@ -3304,17 +3328,12 @@ static jl_value_t *intersect_var(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int
     }
     if (bb->constraintkind == 1) {
         if (!jl_is_type_type(ub) && !jl_is_uniontype(ub) && !jl_is_unionall(ub)) {
-            // For typevar∩typevar covariant, prefer the innervar approach so
-            // diagonal narrowing can be deferred until the enclosing UnionAll
-            // is popped (see `intersect_covariant_var`). For non-typevar `a`,
-            // the existing narrowing of `bb->ub` is both adequate and tighter.
             if (param == PARAM_COVARIANT && bb->concrete) {
-                if (jl_is_typevar(a) && lookup(e, (jl_tvar_t*)a) != NULL) {
-                    JL_GC_PUSH1(&ub);
-                    (void)intersect_covariant_var(b, bb, a, ub, e);
-                    JL_GC_POP();
-                    return (jl_value_t*)b;
-                }
+                jl_value_t *witness = NULL;
+                JL_GC_PUSH2(&ub, &witness);
+                witness = intersect_covariant_var(b, bb, a, ub, e);
+                JL_GC_POP();
+                return witness;
             }
             // For typevar∩structural-with-free-tvars in covariant position,
             // descend through the structural form and replace each free
@@ -3895,8 +3914,9 @@ static jl_value_t *intersect_unionall_(jl_value_t *t, jl_unionall_t *u, jl_stenv
     else {
         res = intersect(u->body, t, e, param);
     }
-    vb->concrete |= (vb->occurs_cov > 1 && is_leaf_typevar(u->var) &&
-                     !var_occurs_invariant(u->body, u->var));
+    int diagonal = (vb->occurs_cov > 1 && is_leaf_typevar(u->var) &&
+                    !var_occurs_invariant(u->body, u->var));
+    vb->concrete |= diagonal;
 
     // handle the "diagonal dispatch" rule, which says that a type var occurring more
     // than once, and only in covariant position, is constrained to concrete types. E.g.
@@ -3905,24 +3925,42 @@ static jl_value_t *intersect_unionall_(jl_value_t *t, jl_unionall_t *u, jl_stenv
     // Then check concreteness by checking that the lower bound is not an abstract type.
     if (res != jl_bottom_type && vb->concrete && !vb->intvalued && vb->lb != jl_bottom_type &&
         (jl_is_type(vb->lb) || jl_is_typevar(vb->lb))) {
-        // Covariant intersections record one witness expression per occurrence
-        // in vb->lb. Diagonal equality applies to those expressions themselves,
-        // not just to the bare innervars that may appear inside them.
-        size_t nwitnesses = 0;
-        jl_value_t **witnesses;
-        JL_GC_PUSHARGS(witnesses, 16);
-        if (collect_diagonal_witnesses(vb->lb, witnesses, &nwitnesses, 16) && nwitnesses > 0) {
+        // Concrete covariant intersections record one witness per occurrence
+        // in vb->lb. Diagonal equality applies to the witness bounds, including
+        // structural bounds such as Tuple{S}.
+        jl_value_t **witnesses = NULL;
+        size_t nwitnesses = count_diagonal_witnesses(vb->lb);
+        JL_GC_PUSHARGS(witnesses, nwitnesses);
+        size_t witnessidx = 0;
+        collect_diagonal_witnesses(vb->lb, witnesses, &witnessidx);
+        assert(witnessidx == nwitnesses);
+        if (nwitnesses > 0) {
             jl_value_t *common = witnesses[0];
-            JL_GC_PUSH2(&res, &common);
-            for (size_t i = 1; i < nwitnesses && common != jl_bottom_type; i++)
-                common = diagonal_witness_meet(common, witnesses[i], e);
-            if (common != jl_bottom_type && nwitnesses == 1 && vb->ub != jl_bottom_type &&
-                (jl_is_type(vb->ub) || jl_is_typevar(vb->ub)))
-                common = diagonal_witness_bound_meet(common, resolve_env_ub(vb->ub, e), e);
-            if (common == jl_bottom_type) {
+            jl_value_t *common_ub = NULL, *witness_ub = NULL;
+            JL_GC_PUSH4(&res, &common, &common_ub, &witness_ub);
+            common_ub = diagonal_witness_ub(common, e);
+            for (size_t i = 1; i < nwitnesses && common_ub != jl_bottom_type; i++) {
+                witness_ub = diagonal_witness_ub(witnesses[i], e);
+                common_ub = diagonal_witness_meet(common_ub, witness_ub, e);
+            }
+            if (common_ub != jl_bottom_type && vb->ub != jl_bottom_type &&
+                (jl_is_type(vb->ub) || jl_is_typevar(vb->ub))) {
+                witness_ub = resolve_env_ub(vb->ub, e);
+                common_ub = diagonal_witness_meet(common_ub, witness_ub, e);
+            }
+            if (common_ub == jl_bottom_type) {
                 res = jl_bottom_type;
             }
             else {
+                for (size_t i = 0; i < nwitnesses; i++) {
+                    witness_ub = diagonal_witness_ub(witnesses[i], e);
+                    unify_diagonal_witness(&res, &vb->lb, &vb->ub, witness_ub, common_ub, e);
+                }
+                if (jl_is_typevar(common)) {
+                    jl_tvar_t *common_var = (jl_tvar_t*)common;
+                    if (!has_typevar_via_bounds(common_ub, common_var, e, NULL))
+                        set_bound(&common_var->ub, common_ub, common_var, e);
+                }
                 common = diagonal_leaf_witness(common, e);
                 for (size_t i = 0; i < nwitnesses; i++)
                     unify_diagonal_witness(&res, &vb->lb, &vb->ub, witnesses[i], common, e);
