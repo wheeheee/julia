@@ -1291,8 +1291,8 @@ let a = Tuple{T1,Val{T2},T2} where T2 where T1,
     I2 = typeintersect(b, a)
     @test I1 <: I2
     @test I2 <: I1
-    @test_broken I1 <: a
-    @test_broken I2 <: a
+    @test I1 <: a
+    @test I2 <: a
     @test I1 <: b
     @test I2 <: b
 end
@@ -1302,8 +1302,8 @@ let a = Tuple{T1,Val{T2},T2} where T2 where T1,
     I2 = typeintersect(b, a)
     @test I1 <: I2
     @test I2 <: I1
-    @test_broken I1 <: a
-    @test_broken I2 <: a
+    @test I1 <: a
+    @test I2 <: a
     @test I1 <: b
     @test I2 <: b
 end
@@ -2604,7 +2604,7 @@ let A = W61602{T, 1} where T<:(Union{Missing, S} where S),
     @test Tuple{C, Int64} <: typeintersect(D, E)
     @test Tuple{C, Int64} <: typeintersect(E, D)
     @test !(Tuple{C, String} <: typeintersect(D, E))
-    @test_broken !(Tuple{C, String} <: typeintersect(E, D))
+    @test !(Tuple{C, String} <: typeintersect(E, D))
 end
 
 # try to fool a greedy algorithm that picks X=Int, Y=String here

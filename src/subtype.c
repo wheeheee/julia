@@ -3285,6 +3285,37 @@ static jl_value_t *intersect_covariant_var(jl_tvar_t *b, jl_varbinding_t *bb, jl
     return ntv;
 }
 
+// For a covariant intersection of two in-env typevars, use the outer variable
+// as the representative and record it as a lower-bound witness for the inner
+// variable. This preserves links across later occurrences without forcing
+// equality between covariant fields.
+static jl_value_t *intersect_typevar_var(jl_tvar_t *outer, jl_varbinding_t *outerb,
+                                         jl_tvar_t *inner, jl_varbinding_t *innerb,
+                                         jl_stenv_t *e, int8_t R)
+{
+    if (!var_outside(e, outer, inner) || reachable_var((jl_value_t*)outer, inner, e))
+        return NULL;
+    jl_value_t *new_lb = NULL, *new_ub = NULL, *outerv = (jl_value_t*)outer;
+    JL_GC_PUSH3(&new_lb, &new_ub, &outerv);
+    if (!intersect_var_ccheck_in_env(outerb->lb, outerb->ub, innerb->lb, innerb->ub, e, R)) {
+        JL_GC_POP();
+        return jl_bottom_type;
+    }
+    new_ub = R ? intersect_aside(innerb->ub, outerb->ub, e, outerb->depth0) :
+                 intersect_aside(outerb->ub, innerb->ub, e, outerb->depth0);
+    if (new_ub == jl_bottom_type) {
+        JL_GC_POP();
+        return jl_bottom_type;
+    }
+    if (!reachable_var(new_ub, outer, e))
+        set_bound(&outerb->ub, new_ub, outer, e);
+    new_lb = simple_join(innerb->lb, outerv);
+    if (!reachable_var(new_lb, inner, e))
+        set_bound(&innerb->lb, new_lb, inner, e);
+    JL_GC_POP();
+    return outerv;
+}
+
 static jl_value_t *intersect_var(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int8_t R, jl_param_pos_t param)
 {
     jl_varbinding_t *bb = lookup(e, b);
@@ -3408,6 +3439,16 @@ static jl_value_t *intersect_var(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int
     }
     else if (bb->constraintkind == 0) {
         JL_GC_PUSH1(&ub);
+        if (param == PARAM_COVARIANT && jl_is_typevar(a)) {
+            jl_varbinding_t *aa = lookup(e, (jl_tvar_t*)a);
+            if (aa != NULL) {
+                jl_value_t *var = intersect_typevar_var(b, bb, (jl_tvar_t*)a, aa, e, R);
+                if (var != NULL) {
+                    JL_GC_POP();
+                    return var;
+                }
+            }
+        }
         if (!jl_is_typevar(a) && try_subtype_in_env(bb->ub, a, e)) {
             JL_GC_POP();
             return (jl_value_t*)b;
@@ -3416,8 +3457,17 @@ static jl_value_t *intersect_var(jl_tvar_t *b, jl_value_t *a, jl_stenv_t *e, int
         return ub;
     }
     assert(bb->constraintkind == 2);
-    if (ub == a && bb->lb != jl_bottom_type)
+    if (param == PARAM_COVARIANT && ub == a && jl_is_typevar(a)) {
+        jl_varbinding_t *aa = lookup(e, (jl_tvar_t*)a);
+        if (aa != NULL) {
+            jl_value_t *var = intersect_typevar_var(b, bb, (jl_tvar_t*)a, aa, e, R);
+            if (var != NULL)
+                return var;
+        }
+    }
+    if (ub == a && bb->lb != jl_bottom_type) {
         return ub;
+    }
     if (jl_egal(bb->ub, bb->lb))
         return ub;
     if (is_leaf_bound(ub))
@@ -3993,8 +4043,12 @@ static jl_value_t *intersect_unionall_(jl_value_t *t, jl_unionall_t *u, jl_stenv
                 common = diagonal_leaf_witness(common, e);
                 for (size_t i = 0; i < nwitnesses; i++)
                     unify_diagonal_witness(&res, &vb->lb, &vb->ub, witnesses[i], common, e);
-                if (jl_has_typevar(res, vb->var))
+                JL_GC_PROMISE_ROOTED(res);
+                JL_GC_PROMISE_ROOTED(common);
+                JL_GC_PROMISE_ROOTED(vb->var);
+                if (jl_has_typevar(res, vb->var)) {
                     res = jl_substitute_var(res, vb->var, common);
+                }
                 vb->lb = common;
                 vb->ub = common;
             }
