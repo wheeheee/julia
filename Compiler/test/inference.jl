@@ -3913,6 +3913,71 @@ end
 
 @test Base.return_types(f_apply_union_split, Tuple{Tuple{typeof(sqrt), typeof(abs)}, Int64}) == Any[Union{Int64, Float64}]
 
+# Filter infeasible union split (aviatesk/JET.jl#713)
+module JET713
+bar(::Int, ::Int) = 1
+bar(::Float64, ::Float64) = 2.0
+bar(::Int, ::Float64) = "infeasible"
+bar(::Float64, ::Int) = :infeasible
+
+bar3(::Int, ::Int, ::Int) = 1
+bar3(::Float64, ::Float64, ::Float64) = 2.0
+bar3(::Int, ::Int, ::Float64) = "infeasible"
+bar3(::Int, ::Float64, ::Int) = "infeasible"
+bar3(::Float64, ::Int, ::Int) = "infeasible"
+bar3(::Int, ::Float64, ::Float64) = :infeasible
+bar3(::Float64, ::Int, ::Float64) = :infeasible
+bar3(::Float64, ::Float64, ::Int) = :infeasible
+
+bar_param(::Vector{Int}, ::Vector{Int}) = 1
+bar_param(::Vector{Float64}, ::Vector{Float64}) = 2.0
+bar_param(::Vector{Int}, ::Vector{Float64}) = "infeasible"
+bar_param(::Vector{Float64}, ::Vector{Int}) = :infeasible
+
+bar_vararg(::Int, ::Tuple{Vararg{Int}}) = 1
+bar_vararg(::Float64, ::Tuple{Vararg{Float64}}) = 2.0
+bar_vararg(::Int, ::Tuple{Float64, Vararg{Float64}}) = "infeasible"
+bar_vararg(::Float64, ::Tuple{Int, Vararg{Int}}) = :infeasible
+
+bar_abs(::Missing, ::Missing, ::Int) = 1
+bar_abs(::Missing, ::Missing, ::Float64) = 2.0
+bar_abs(::AbstractString, ::AbstractString, ::Int) = "feasible"
+bar_abs(::AbstractString, ::AbstractString, ::Float64) = :feasible
+bar_abs(::Missing, ::AbstractString, ::Union{Int,Float64}) = nothing # infeasible
+bar_abs(::AbstractString, ::Missing, ::Union{Int,Float64}) = 0x1     # infeasible
+
+foo(x::T, y::T) where {T<:Union{Int,Float64}} = bar(x, y)
+foo3(x::T, y::T, z::T) where {T<:Union{Int,Float64}} = bar3(x, y, z)
+foo_param(x::Vector{T}, y::Vector{T}) where {T<:Union{Int,Float64}} = bar_param(x, y)
+foo_untyped(x::T, y::T) where T = bar(x, y)
+same_slot(x::Union{Int,Float64}) = bar(x, x)
+same_slot_diag(x::T, y::T) where {T<:Union{Int,Float64}} = bar(x, x)
+foo_vararg(x::T, y::T, zs::T...) where {T<:Union{Int,Float64}} = bar(x, y)
+foo_vararg_rest(x::T, ys::T...) where {T<:Union{Int,Float64}} = bar_vararg(x, ys)
+foo_abs(x::T, y::T, z::Union{Int,Float64}) where {T<:Union{Missing,AbstractString}} = bar_abs(x, y, z)
+foo_refined(x::T, y::T) where {T<:Union{Int,Float64}} = y isa Int ? bar(x, y) : zero(y)
+end
+
+@test Base.infer_return_type(JET713.foo) == Union{Int64, Float64}
+@test Base.infer_return_type(JET713.foo3) == Union{Int64, Float64}
+@test Base.infer_return_type(JET713.foo_param) == Union{Int64, Float64}
+@test Base.infer_return_type(JET713.foo_untyped, (Union{Int64, Float64},Union{Int64, Float64})) == Union{Int64, Float64}
+@test Base.infer_return_type(JET713.same_slot) == Union{Int64, Float64}
+# Same caller slot in multiple positions of a constrained (`UnionAll` caller) split.
+@test Base.infer_return_type(JET713.same_slot_diag) == Union{Int64, Float64}
+# Vararg frames can use constraints from fixed caller argument slots.
+@test Base.infer_return_type(JET713.foo_vararg) == Union{Int64, Float64}
+# Vararg rest slots can be projected as tuple values.
+@test Base.infer_return_type(JET713.foo_vararg_rest) == Union{Int64, Float64}
+# Feasible splits must not be pruned even when they are not fully covered by the
+# caller signature: `(AbstractString, AbstractString)` is not fully covered by the
+# diagonal `Tuple{T,T} where T<:Union{Missing,AbstractString}`, but is still
+# reachable, e.g. when both arguments are `String`s.
+@test Base.infer_return_type(JET713.foo_abs) == Union{Int64, Float64, String, Symbol}
+# A single feasible combination is still worth splitting on: here the infeasible
+# `bar(::Float64, ::Int)` combination is pruned, leaving only `bar(::Int, ::Int)`.
+@test Base.infer_return_type(JET713.foo_refined) == Union{Int64, Float64}
+
 # Precision of typeassert with PartialStruct
 function f_typ_assert(x::Int)
     y = (x, 1)

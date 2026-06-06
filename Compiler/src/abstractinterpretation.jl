@@ -132,7 +132,7 @@ function abstract_call_gf_by_type(interp::AbstractInterpreter, @nospecialize(fun
         return Future(CallMeta(Any, Any, Effects(), NoCallInfo()))
     end
     current_world = get_world_counter()
-    matches = find_method_matches(interp, argtypes, atype; max_methods, fargs=arginfo.fargs)
+    matches = find_method_matches(interp, arginfo, atype, sv; max_methods)
     if isa(matches, FailedMethodMatch)
         add_remark!(interp, sv, matches.reason)
         return Future(CallMeta(Any, Any, Effects(), NoCallInfo()))
@@ -358,25 +358,111 @@ function abstract_call_gf_by_type(interp::AbstractInterpreter, @nospecialize(fun
     return gfresult
 end
 
-function find_method_matches(interp::AbstractInterpreter, argtypes::Vector{Any}, @nospecialize(atype);
-                             max_union_splitting::Int = InferenceParams(interp).max_union_splitting,
-                             max_methods::Int = InferenceParams(interp).max_methods,
-                             fargs::Union{Nothing,Vector{Any}}=nothing)
-    if is_union_split_eligible(typeinf_lattice(interp), argtypes, max_union_splitting; fargs)
-        return find_union_split_method_matches(interp, argtypes, max_methods; fargs)
+function find_method_matches(
+        interp::AbstractInterpreter, arginfo::ArgInfo, @nospecialize(atype), sv::AbsIntState;
+        max_union_splitting::Int = InferenceParams(interp).max_union_splitting,
+        max_methods::Int = InferenceParams(interp).max_methods
+    )
+    𝕃 = typeinf_lattice(interp)
+    cost = unionsplitcost(𝕃, arginfo.argtypes; fargs=arginfo.fargs)
+    constraints = caller_sig_constraints(𝕃, arginfo, sv)
+    if constraints !== nothing
+        # First use caller-signature constraints to prune infeasible top-level union
+        # split combinations. Vararg frames use constrained signature lookup only.
+        # Since infeasible combinations are pruned before they count against
+        # `max_union_splitting`, the enumeration may explore more combinations
+        # than it emits, and each explored combination performs a type
+        # intersection query: bound the total exploration work as well.
+        if !has_vararg_frame(constraints) && 1 < cost <= max_union_splitting * max_union_splitting
+            split_argtypes = switchtupleunion(𝕃, arginfo.argtypes, constraints, max_union_splitting)
+            if split_argtypes !== nothing
+                return find_union_split_method_matches(interp, split_argtypes, max_methods)
+            end
+        end
+        projected_atype = project_caller_sig(arginfo.argtypes, constraints)
+        if projected_atype !== nothing && projected_atype <: atype
+            return find_simple_method_matches(interp, projected_atype, max_methods)
+        end
+    end
+    if 1 < cost <= max_union_splitting
+        split_argtypes = switchtupleunion(𝕃, arginfo.argtypes; fargs=arginfo.fargs)
+        return find_union_split_method_matches(interp, split_argtypes, max_methods)
     end
     return find_simple_method_matches(interp, atype, max_methods)
 end
 
-# NOTE this is valid as far as any "constant" lattice element doesn't represent `Union` type
-is_union_split_eligible(𝕃::AbstractLattice, argtypes::Vector{Any}, max_union_splitting::Int;
-                        fargs::Union{Nothing,Vector{Any}}=nothing) =
-    1 < unionsplitcost(𝕃, argtypes; fargs) <= max_union_splitting
+function caller_sig_constraints(𝕃::AbstractLattice, arginfo::ArgInfo, sv::AbsIntState)
+    sv isa InferenceState || return nothing
+    # This refinement projects the caller method signature onto the callee call
+    # signature, which is only useful when that signature constrains its
+    # argument slots beyond their individual declared types, i.e. when it is a
+    # `UnionAll` whose type variables couple multiple arguments (or multiple
+    # parameters of one argument).
+    sv.linfo.specTypes isa UnionAll || return nothing
+    fargs = arginfo.fargs
+    fargs === nothing && return nothing
+    length(fargs) == length(arginfo.argtypes) || return nothing
+    any(isvarargtype, arginfo.argtypes) && return nothing
+    nargs = Int(sv.src.nargs)
+    arg_slots = fill(0, length(fargs))
+    found_slot = false
+    for i = 1:length(fargs)
+        farg = ssa_def_slot(fargs[i], sv)
+        farg isa SlotNumber || continue
+        slot = slot_id(farg)
+        # Only caller argument slots are usable here. Other local slots do not
+        # participate in the caller method signature and therefore cannot safely
+        # recover same-TypeVar constraints from it.
+        1 <= slot <= nargs || continue
+        arg_slots[i] = slot
+        found_slot = true
+    end
+    found_slot || return nothing
+    # `sv.result.argtypes` is the cache/matching representation. Convert it to
+    # the actual caller frame argument vector before indexing by SlotNumber.
+    frame_argtypes = va_process_argtypes(𝕃, copy(sv.result.argtypes), sv.src.nargs, sv.src.isva, sv.linfo)
+    any(isvarargtype, frame_argtypes) && return nothing
+    length(frame_argtypes) == nargs || return nothing
+    frame_nfixed = nargs - Int(sv.src.isva)
+    return CallerSigConstraints(sv.linfo.specTypes, frame_argtypes, arg_slots, frame_nfixed)
+end
 
-function find_union_split_method_matches(interp::AbstractInterpreter, argtypes::Vector{Any},
-                                         max_methods::Int;
-                                         fargs::Union{Nothing,Vector{Any}}=nothing)
-    split_argtypes = switchtupleunion(typeinf_lattice(interp), argtypes; fargs)
+has_vararg_frame(constraints::CallerSigConstraints) =
+    constraints.frame_nfixed < length(constraints.frame_argtypes)
+
+function project_caller_sig(argtypes::Vector{Any}, constraints::CallerSigConstraints)
+    frame_tuple = unwrap_unionall(constraints.frame_sig)
+    frame_tuple isa DataType || return nothing
+    projected_argtypes = Any[]
+    sizehint!(projected_argtypes, length(argtypes))
+    for i = 1:length(argtypes)
+        slot = constraints.arg_slots[i]
+        if slot == 0
+            argtype = argtypes[i]
+            push!(projected_argtypes, isvarargtype(argtype) ? argtype : widenconst(argtype))
+        else
+            1 <= slot <= length(constraints.frame_argtypes) || return nothing
+            if has_vararg_frame(constraints) && slot > constraints.frame_nfixed
+                slot == constraints.frame_nfixed + 1 || return nothing
+                isempty(frame_tuple.parameters) && return nothing
+                vaty = frame_tuple.parameters[end]
+                isvarargtype(vaty) || return nothing
+                push!(projected_argtypes, Tuple{vaty})
+            else
+                slot <= constraints.frame_nfixed || return nothing
+                slot <= length(frame_tuple.parameters) || return nothing
+                push!(projected_argtypes, frame_tuple.parameters[slot])
+            end
+        end
+    end
+    all(@nospecialize(x) -> isvarargtype(x) || valid_as_lattice(x, true), projected_argtypes) ||
+        return nothing
+    return rewrap_unionall(Tuple{projected_argtypes...}, constraints.frame_sig)
+end
+
+function find_union_split_method_matches(
+        interp::AbstractInterpreter, split_argtypes::Vector, max_methods::Int
+    )
     infos = MethodMatchInfo[]
     applicable = MethodMatchTarget[]
     applicable_argtypes = Vector{Any}[] # arrays like `argtypes`, including constants, for each match
