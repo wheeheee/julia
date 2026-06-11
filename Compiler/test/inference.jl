@@ -3946,6 +3946,16 @@ bar_abs(::AbstractString, ::AbstractString, ::Float64) = :feasible
 bar_abs(::Missing, ::AbstractString, ::Union{Int,Float64}) = nothing # infeasible
 bar_abs(::AbstractString, ::Missing, ::Union{Int,Float64}) = 0x1     # infeasible
 
+bar_nondiag(::T, ::T) where T = 1
+bar_nondiag(::Integer, ::AbstractFloat) = "cross"
+bar_nondiag(::AbstractFloat, ::Integer) = :cross
+
+bar_dist(::Missing, ::Missing) = 1
+bar_dist(::T, ::T) where {T<:AbstractString} = 2.0
+bar_dist(::String, ::SubString{String}) = "mixed" # unreachable: `x` and `y` share one concrete `T`
+bar_dist_nothrow(::Missing, ::Missing) = 1
+bar_dist_nothrow(::T, ::T) where {T<:AbstractString} = 2.0
+
 foo(x::T, y::T) where {T<:Union{Int,Float64}} = bar(x, y)
 foo3(x::T, y::T, z::T) where {T<:Union{Int,Float64}} = bar3(x, y, z)
 foo_param(x::Vector{T}, y::Vector{T}) where {T<:Union{Int,Float64}} = bar_param(x, y)
@@ -3956,6 +3966,13 @@ foo_vararg(x::T, y::T, zs::T...) where {T<:Union{Int,Float64}} = bar(x, y)
 foo_vararg_rest(x::T, ys::T...) where {T<:Union{Int,Float64}} = bar_vararg(x, ys)
 foo_abs(x::T, y::T, z::Union{Int,Float64}) where {T<:Union{Missing,AbstractString}} = bar_abs(x, y, z)
 foo_refined(x::T, y::T) where {T<:Union{Int,Float64}} = y isa Int ? bar(x, y) : zero(y)
+# `T` is not diagonal here: the invariant occurrence in `Vector{T}` allows `T` to be
+# bound to an abstract type (e.g. the whole union), so `x` and `y` may have different
+# concrete types at runtime. The union bound is wide enough that the call site
+# exceeds `max_union_splitting`.
+foo_nondiag(x::T, y::T, z::Vector{T}) where {T<:Union{Int8,Int16,Int32,Int64,Float64}} = bar_nondiag(x, y)
+foo_dist(x::T, y::T) where {T<:Union{Missing,AbstractString}} = bar_dist(x, y)
+foo_dist_nothrow(x::T, y::T) where {T<:Union{Missing,AbstractString}} = bar_dist_nothrow(x, y)
 end
 
 @test Base.infer_return_type(JET713.foo) == Union{Int64, Float64}
@@ -3977,6 +3994,19 @@ end
 # A single feasible combination is still worth splitting on: here the infeasible
 # `bar(::Float64, ::Int)` combination is pruned, leaving only `bar(::Int, ::Int)`.
 @test Base.infer_return_type(JET713.foo_refined) == Union{Int64, Float64}
+# Projecting the caller signature must not narrow the lookup: since `T` is not diagonal in
+# the caller signature, `Tuple{typeof(bar_nondiag), T, T} where T` would wrongly claim that
+# both arguments have the same concrete type, excluding the reachable cross methods.
+@test Base.infer_return_type(JET713.foo_nondiag) == Union{Int64, String, Symbol}
+# The splitter substitutes each union-bound component into the argument positions, so the
+# `AbstractString` arm becomes `Tuple{AbstractString,AbstractString}`, losing the
+# same-concrete-type constraint within the arm (it admits e.g. `(String, SubString)`,
+# which no single binding of `T` can produce). With bound-distributed arms
+# (`Tuple{T,T} where T<:AbstractString`, enabled by the subtyping change of #62074),
+# the cross-type method would be excluded from the match set and the diagonal method
+# would fully cover its arm, making the call `:nothrow`.
+@test_broken Base.infer_return_type(JET713.foo_dist) == Union{Int64, Float64}
+@test_broken Compiler.is_nothrow(Base.infer_effects(JET713.foo_dist_nothrow))
 
 # Precision of typeassert with PartialStruct
 function f_typ_assert(x::Int)

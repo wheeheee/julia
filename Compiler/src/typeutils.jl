@@ -349,74 +349,19 @@ function switchtupleunion(𝕃::AbstractLattice, argtypes::Vector{Any};
     tunion = Vector{Any}[]
     na = length(argtypes)
     groups = compute_alias_groups(na, fargs, argtypes)
-    _switchtupleunion(𝕃, argtypes, na, tunion, nothing, typemax(Int), groups)
+    _switchtupleunion(𝕃, argtypes, na, tunion, groups)
     return tunion
 end
 
-"""
-    CallerSigConstraints
-
-Represents the currently supported caller-frame constraints used to prune
-call-site union splitting.
-
-This intentionally only records call arguments that originate from caller
-argument slots. In particular, it does not try to model static parameters or a
-general argument-origin abstraction.
-
-Fields:
-- `frame_sig` is the original caller method signature, including constraints
-  such as repeated use of the same type variable.
-- `frame_argtypes` is the caller frame's argument type vector. It must be the
-  result of processing `sv.result.argtypes` with `va_process_argtypes(...,
-  sv.src.nargs, sv.src.isva)`, not arbitrary local slot types.
-- `arg_slots[i]` is the caller argument slot used by call argument `i`, or `0`
-  when argument `i` is not known to originate from a caller argument slot.
-- `frame_nfixed` is the number of fixed caller argument slots. For vararg
-  frames, this excludes the final rest slot.
-"""
-struct CallerSigConstraints
-    frame_sig::Type
-    frame_argtypes::Vector{Any}
-    arg_slots::Vector{Int}
-    frame_nfixed::Int
-end
-
-struct SwitchTupleUnionState
-    constraints::CallerSigConstraints
-    assigned::Vector{Any} # entries are either `nothing` or widened `Type` constraints
-end
-
-function switchtupleunion(
-        𝕃::AbstractLattice, argtypes::Vector{Any}, constraints::CallerSigConstraints,
-        max_union_splitting::Int
-    )
-    tunion = Vector{Any}[]
-    assigned = Any[nothing for _ = 1:length(constraints.frame_argtypes)]
-    state = SwitchTupleUnionState(constraints, assigned)
-    _switchtupleunion(𝕃, copy(argtypes), length(argtypes), tunion, state,
-        max_union_splitting, nothing) || return nothing
-    # The caller ensures `unionsplitcost(...) > 1`, so even a single emitted
-    # combination means that infeasible combinations were pruned and the result
-    # is worth using. When no combination is feasible at all, conservatively
-    # decline so that the caller falls back to ordinary method lookup.
-    return isempty(tunion) ? nothing : tunion
-end
-
-function _switchtupleunion(
-        𝕃::AbstractLattice, t::Vector{Any}, i::Int, tunion::Vector{Vector{Any}},
-        state::Union{Nothing,SwitchTupleUnionState}, max_union_splitting::Int,
-        groups::Union{Nothing,Vector{Int}}
-    )
+function _switchtupleunion(𝕃::AbstractLattice, t::Vector{Any}, i::Int,
+                           tunion::Vector{Vector{Any}}, groups::Union{Nothing,Vector{Int}})
     if i == 0
-        # No feasibility check is needed here: `_switchtupleunion_branch` checks
-        # feasibility whenever a slot constraint is updated, so any leaf reached
-        # is already known to be feasible.
         push!(tunion, copy(t))
-        return length(tunion) <= max_union_splitting
+        return tunion
     end
 
     if groups !== nothing && groups[i] != i
-        return _switchtupleunion(𝕃, t, i - 1, tunion, state, max_union_splitting, groups)
+        return _switchtupleunion(𝕃, t, i - 1, tunion, groups)
     end
 
     origti = ti = t[i]
@@ -436,8 +381,7 @@ function _switchtupleunion(
             for j in followers
                 t[j] = ty
             end
-            _switchtupleunion_branch(𝕃, t, i, tunion, state, max_union_splitting,
-                groups) || return false
+            _switchtupleunion(𝕃, t, i - 1, tunion, groups)
         end
     elseif (has_extended_unionsplit(𝕃) && !isa(ti, Const) && !isvarargtype(ti) &&
             (wty = widenconst(ti); isa(wty, Union)))
@@ -446,84 +390,172 @@ function _switchtupleunion(
             for j in followers
                 t[j] = ty
             end
-            _switchtupleunion_branch(𝕃, t, i, tunion, state, max_union_splitting,
-                groups) || return false
+            _switchtupleunion(𝕃, t, i - 1, tunion, groups)
         end
     else
-        _switchtupleunion_branch(𝕃, t, i, tunion, state, max_union_splitting,
-            groups) || return false
+        _switchtupleunion(𝕃, t, i - 1, tunion, groups)
     end
     t[i] = origti
     for (k, j) in enumerate(followers)
         t[j] = origtypes[k]
     end
-    return true
+    return tunion
 end
 
-function _switchtupleunion_branch(
-        𝕃::AbstractLattice, t::Vector{Any}, i::Int, tunion::Vector{Vector{Any}},
-        state::Nothing, max_union_splitting::Int, groups::Union{Nothing,Vector{Int}}
-    )
-    return _switchtupleunion(𝕃, t, i - 1, tunion, state, max_union_splitting, groups)
+"""
+    CallerSigConstraints
+
+Represents the caller-side information needed to project the caller method
+signature onto a callee call signature (see `project_caller_sig`).
+
+This intentionally only records call arguments that originate from caller
+argument slots. In particular, it does not try to model static parameters or a
+general argument-origin abstraction.
+
+Fields:
+- `frame_sig` is the original caller method signature, including constraints
+  such as repeated use of the same type variable.
+- `arg_slots[i]` is the caller argument slot used by call argument `i`, or `0`
+  when argument `i` is not known to originate from a caller argument slot.
+- `frame_nargs` is the number of caller argument slots.
+- `frame_nfixed` is the number of fixed caller argument slots. For vararg
+  frames, this excludes the final rest slot.
+"""
+struct CallerSigConstraints
+    frame_sig::Type
+    arg_slots::Vector{Int}
+    frame_nargs::Int
+    frame_nfixed::Int
 end
 
-function _switchtupleunion_branch(
-        𝕃::AbstractLattice, t::Vector{Any}, i::Int, tunion::Vector{Vector{Any}},
-        state::SwitchTupleUnionState, max_union_splitting::Int,
-        groups::Union{Nothing,Vector{Int}}
-    )
-    (; constraints, assigned) = state
-    slot = constraints.arg_slots[i]
-    if slot == 0
-        return _switchtupleunion(𝕃, t, i - 1, tunion, state, max_union_splitting, groups)
-    end
-    old = assigned[slot]
-    typ = merge_slot_constraint(old, t[i])
-    typ === Bottom && return true
-    if typ === old
-        return _switchtupleunion(𝕃, t, i - 1, tunion, state, max_union_splitting, groups)
-    end
-    assigned[slot] = typ
-    if !is_feasible_caller_frame(𝕃, state)
-        assigned[slot] = old
-        return true
-    end
-    ok = _switchtupleunion(𝕃, t, i - 1, tunion, state, max_union_splitting, groups)
-    assigned[slot] = old
-    return ok
+"""
+    CallSigProjection
+
+The caller method signature projected onto a callee call signature
+(see `project_caller_sig`).
+
+Fields:
+- `atype` is the projected callee signature for method lookup, or `nothing`
+  when it is not valid as a lookup signature.
+- `bound_vars[i]` is the enumerable `TypeVar` that call argument `i` is locked
+  to, or `nothing`.
+- `en_vars[k]` is an enumerable type variable: it occurs only as a direct call
+  argument type and its upper bound is a union, so the call can be union-split
+  by substituting the variable with each component of its bound
+  (`en_components[k]`), with all arguments locked to the same variable taking
+  the same component simultaneously.
+- `split_ok` is `false` when union-splitting the call arguments would sever a
+  constraint of the projected signature: a non-enumerable variable that couples
+  multiple call arguments (e.g. through an invariant or `Vararg` occurrence)
+  can only be preserved by looking up `atype` itself.
+"""
+struct CallSigProjection
+    atype # ::Union{Nothing,Type}
+    bound_vars::Vector{Any} # entries are `TypeVar` or `nothing`
+    en_vars::Vector{TypeVar}
+    en_components::Vector{Vector{Any}}
+    split_ok::Bool
 end
 
-function merge_slot_constraint(@nospecialize(old), @nospecialize(typ))
-    wtyp = widenconst(typ)
-    old === nothing && return wtyp
-    return typeintersect(old, wtyp)
+# Count the occurrences of `var` in `t`, separately for covariant and invariant
+# positions, returned as a `(covariant, invariant)` tuple. `Tuple` parameters
+# and `Union` components continue the current variance; all other `DataType`
+# parameters are invariant. A `Vararg` element type is counted twice since it
+# may cover multiple positions (which makes the variable diagonal). Bounds of
+# inner `UnionAll` variables are conservatively counted as invariant.
+function count_typevar_occurrences(var::TypeVar, @nospecialize(t), invariant::Bool=false)
+    if t === var
+        return invariant ? (0, 1) : (1, 0)
+    elseif isvarargtype(t)
+        cov = inv = 0
+        if isdefined(t, :T)
+            c, v = count_typevar_occurrences(var, t.T, invariant)
+            cov += 2c
+            inv += 2v
+        end
+        if isdefined(t, :N) && t.N === var
+            inv += 1
+        end
+        return (cov, inv)
+    elseif t isa DataType
+        inner_invariant = invariant || t.name !== Tuple.name
+        cov = inv = 0
+        for p in t.parameters
+            c, v = count_typevar_occurrences(var, p, inner_invariant)
+            cov += c
+            inv += v
+        end
+        return (cov, inv)
+    elseif t isa Union
+        c1, v1 = count_typevar_occurrences(var, t.a, invariant)
+        c2, v2 = count_typevar_occurrences(var, t.b, invariant)
+        return (c1 + c2, v1 + v2)
+    elseif t isa UnionAll
+        c1, v1 = count_typevar_occurrences(var, t.var.lb, true)
+        c2, v2 = count_typevar_occurrences(var, t.var.ub, true)
+        c3, v3 = t.var === var ? (0, 0) : count_typevar_occurrences(var, t.body, invariant)
+        return (c1 + c2 + c3, v1 + v2 + v3)
+    end
+    return (0, 0)
 end
 
-function is_feasible_caller_frame(𝕃::AbstractLattice, state::SwitchTupleUnionState)
-    constraints = state.constraints
-    assigned = state.assigned
-    projected_frame_argtypes = copy(constraints.frame_argtypes)
-    for slot = 1:length(assigned)
-        typ = assigned[slot]
-        typ === nothing && continue
-        wtyp = widenconst(typ)
-        typ = tmeet(𝕃, projected_frame_argtypes[slot], wtyp)
-        typ === Bottom && return false
-        projected_frame_argtypes[slot] = typ
+# Union-split the call arguments of a projected call signature: enumerate the
+# components of each enumerable type variable, with all arguments locked to the
+# same variable taking the same component simultaneously, then split the
+# remaining arguments as an ordinary tuple union. Since each variable is
+# enumerated once rather than per argument position, combinations that would
+# contradict the caller signature are never generated. Returns `nothing` when
+# splitting is not applicable or not profitable.
+function switchtupleunion(𝕃::AbstractLattice, argtypes::Vector{Any},
+                          projection::CallSigProjection, max_union_splitting::Int;
+                          fargs::Union{Nothing,Vector{Any}}=nothing)
+    projection.split_ok || return nothing
+    nsplit = 1
+    for comps in projection.en_components
+        nsplit, ovf = Core.Intrinsics.checked_smul_int(nsplit, length(comps))
+        ovf && return nothing
     end
-    projected_frame_sig = argtypes_to_type(projected_frame_argtypes)
-    projected_frame_sig === Bottom && return false
-    # Prune this branch only when the projected caller frame provably has no
-    # intersection with the original caller signature, i.e. when no caller frame
-    # instance can produce this combination of argument types. Note that
-    # requiring full coverage (`projected_frame_sig <: constraints.frame_sig`)
-    # instead would be unsound: for example `(AbstractString, AbstractString)`
-    # is not fully covered by `Tuple{T,T} where T<:Union{Missing,AbstractString}`
-    # (`T` is diagonal there), yet such a combination is still reachable, e.g.
-    # when both arguments are `String`s. `typeintersect` may conservatively
-    # over-approximate the intersection (e.g. for diagonal variables), which
-    # only makes this check prune less, never incorrectly.
-    return hasintersect(projected_frame_sig, constraints.frame_sig)
+    # The variable-locked arguments split with their variable, so they don't
+    # multiply the cost of splitting the remaining arguments. N.B. substituting
+    # an abstract component into a union-typed argument may leave a residual
+    # union that splits further, so like `unionsplitcost` itself this is an
+    # estimate of the number of emitted combinations, not an exact bound.
+    masked = copy(argtypes)
+    for i = 1:length(argtypes)
+        projection.bound_vars[i] === nothing || (masked[i] = Nothing)
+    end
+    cost, ovf = Core.Intrinsics.checked_smul_int(nsplit, unionsplitcost(𝕃, masked; fargs))
+    (ovf || !(1 < cost <= max_union_splitting)) && return nothing
+    tunion = Vector{Any}[]
+    _constrained_switchtupleunion!(tunion, 𝕃, argtypes, projection, 1, fargs)
+    return isempty(tunion) ? nothing : tunion
+end
+
+function _constrained_switchtupleunion!(tunion::Vector{Vector{Any}}, 𝕃::AbstractLattice,
+        argtypes::Vector{Any}, projection::CallSigProjection, k::Int,
+        fargs::Union{Nothing,Vector{Any}})
+    if k > length(projection.en_vars)
+        append!(tunion, switchtupleunion(𝕃, argtypes; fargs))
+        return nothing
+    end
+    var = projection.en_vars[k]
+    for comp in projection.en_components[k]
+        newargtypes = copy(argtypes)
+        feasible = true
+        for i = 1:length(argtypes)
+            projection.bound_vars[i] === var || continue
+            newargtype = tmeet(𝕃, argtypes[i], comp)
+            if newargtype === Bottom
+                # this component contradicts a refined argument type
+                feasible = false
+                break
+            end
+            newargtypes[i] = newargtype
+        end
+        feasible || continue
+        _constrained_switchtupleunion!(tunion, 𝕃, newargtypes, projection, k + 1, fargs)
+    end
+    return nothing
 end
 
 # unioncomplexity estimates the number of calls to `tmerge` to obtain the given type by
