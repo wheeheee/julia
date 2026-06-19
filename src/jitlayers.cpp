@@ -1070,6 +1070,7 @@ RTDyldMemoryManager *createRTDyldMemoryManager(void) JL_NOTSAFEPOINT;
 std::unique_ptr<jitlink::JITLinkMemoryManager> createJITLinkMemoryManager() JL_NOTSAFEPOINT;
 
 // A simple forwarding class, since OrcJIT v2 needs a unique_ptr, while we have a shared_ptr
+namespace {
 class ForwardingMemoryManager : public RuntimeDyld::MemoryManager {
 private:
     std::shared_ptr<RuntimeDyld::MemoryManager> MemMgr;
@@ -1116,6 +1117,7 @@ public:
         return MemMgr->notifyObjectLoaded(RTDyld, Obj);
     }
 };
+}  // anonymous namespace
 
 namespace {
     static std::unique_ptr<TargetMachine> createTargetMachine() JL_NOTSAFEPOINT {
