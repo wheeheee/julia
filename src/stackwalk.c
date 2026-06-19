@@ -231,7 +231,7 @@ NOINLINE size_t rec_backtrace(jl_bt_element_t *bt_data, size_t maxsize, int skip
     return bt_size;
 }
 
-NOINLINE int failed_to_sample_task_fun(jl_bt_element_t *bt_data, size_t maxsize, int skip) JL_NOTSAFEPOINT
+JL_DLLEXPORT NOINLINE int failed_to_sample_task_fun(jl_bt_element_t *bt_data, size_t maxsize, int skip) JL_NOTSAFEPOINT
 {
     if (maxsize < 1) {
         return 0;
@@ -240,7 +240,7 @@ NOINLINE int failed_to_sample_task_fun(jl_bt_element_t *bt_data, size_t maxsize,
     return 1;
 }
 
-NOINLINE int failed_to_stop_thread_fun(jl_bt_element_t *bt_data, size_t maxsize, int skip) JL_NOTSAFEPOINT
+JL_DLLEXPORT NOINLINE int failed_to_stop_thread_fun(jl_bt_element_t *bt_data, size_t maxsize, int skip) JL_NOTSAFEPOINT
 {
     if (maxsize < 1) {
         return 0;
@@ -1128,7 +1128,7 @@ extern bt_context_t *jl_to_bt_context(void *sigctx) JL_NOTSAFEPOINT;
 // support shadow stacks, so if those are in use, you might need to use a direct
 // jl_longjmp instead to leave the signal frame instead of relying on simulating
 // it and attempting to return normally.
-int jl_simulate_longjmp(jl_jmp_buf mctx, bt_context_t *c) JL_NOTSAFEPOINT
+extern int jl_simulate_longjmp(jl_jmp_buf mctx, bt_context_t *c) JL_NOTSAFEPOINT
 {
 #if (defined(_COMPILER_ASAN_ENABLED_) || defined(_COMPILER_TSAN_ENABLED_))
     // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/hwasan/hwasan_interceptors.cpp
@@ -1518,7 +1518,7 @@ JL_DLLEXPORT jl_record_backtrace_result_t jl_record_backtrace(jl_task_t *t, jl_b
 //--------------------------------------------------
 // Tools for interactive debugging in gdb
 
-JL_DLLEXPORT void jl_gdblookup(void* ip)
+JL_DLLEXPORT void jl_gdblookup(void* ip) JL_NOTSAFEPOINT
 {
     jl_fprint_native_codeloc(ios_safe_stderr, (uintptr_t)ip);
 }

@@ -124,7 +124,7 @@ void jl_threadfun(void *arg)
 
 
 
-void jl_init_thread_scheduler(jl_ptls_t ptls) JL_NOTSAFEPOINT
+extern void jl_init_thread_scheduler(jl_ptls_t ptls) JL_NOTSAFEPOINT
 {
     uv_mutex_init(&ptls->sleep_lock);
     uv_cond_init(&ptls->wake_signal);
@@ -186,7 +186,7 @@ static int sleep_check_after_threshold(uint64_t *start_cycles) JL_NOTSAFEPOINT
     return 0;
 }
 
-void surprise_wakeup(jl_ptls_t ptls) JL_NOTSAFEPOINT
+extern void surprise_wakeup(jl_ptls_t ptls) JL_NOTSAFEPOINT
 {
     // equivalent to wake_thread, without the assert on wasrunning
     int8_t state = jl_atomic_load_relaxed(&ptls->sleep_check_state);
@@ -240,7 +240,7 @@ static void wake_libuv(void) JL_NOTSAFEPOINT
     JULIA_DEBUG_SLEEPWAKE( io_wakeup_leave = cycleclock() );
 }
 
-void wakeup_thread(jl_task_t *ct, int16_t tid) JL_NOTSAFEPOINT { // Pass in ptls when we have it already available to save a lookup
+static void wakeup_thread(jl_task_t *ct, int16_t tid) JL_NOTSAFEPOINT { // Pass in ptls when we have it already available to save a lookup
     int16_t self = jl_atomic_load_relaxed(&ct->tid);
     if (tid != self)
         jl_fence(); // [^store_buffering_1]
@@ -618,7 +618,7 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
     }
 }
 
-void scheduler_delete_thread(jl_ptls_t ptls) JL_NOTSAFEPOINT
+extern void scheduler_delete_thread(jl_ptls_t ptls) JL_NOTSAFEPOINT
 {
     int notsleeping = jl_atomic_exchange_relaxed(&ptls->sleep_check_state, sleeping_like_the_dead) == not_sleeping;
     jl_fence();

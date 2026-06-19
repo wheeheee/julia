@@ -381,7 +381,7 @@ JL_DLLEXPORT void jl_exit_on_sigint(int on)
 }
 
 static uintptr_t jl_get_pc_from_ctx(const void *_ctx);
-void jl_fprint_sigill(ios_t *s, void *_ctx);
+static void jl_fprint_sigill(ios_t *s, void *_ctx);
 #if defined(_CPU_X86_64_) || defined(_CPU_X86_) \
     || (defined(_OS_LINUX_) && defined(_CPU_AARCH64_)) \
     || (defined(_OS_LINUX_) && defined(_CPU_ARM_)) \
@@ -484,7 +484,7 @@ static uintptr_t jl_get_pc_from_ctx(const void *_ctx)
 #endif
 }
 
-void jl_fprint_sigill(ios_t *s, void *_ctx)
+static void jl_fprint_sigill(ios_t *s, void *_ctx)
 {
     char *pc = (char*)jl_get_pc_from_ctx(_ctx);
     // unsupported platform
@@ -581,7 +581,7 @@ void surprise_wakeup(jl_ptls_t ptls) JL_NOTSAFEPOINT;
 // this is generally quite a foolish operation, but does free you up to do
 // arbitrary things on this stack now without worrying about corrupt state that
 // existed already on it
-void jl_task_frame_noreturn(jl_task_t *ct) JL_NOTSAFEPOINT
+extern void jl_task_frame_noreturn(jl_task_t *ct) JL_NOTSAFEPOINT
 {
     jl_set_safe_restore(NULL);
     if (ct) {

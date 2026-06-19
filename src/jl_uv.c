@@ -78,7 +78,7 @@ static void wait_empty_func(uv_timer_t *t)
     jl_gc_collect(JL_GC_FULL);
 }
 
-void jl_wait_empty_begin(void)
+extern void jl_wait_empty_begin(void)
 {
     JL_UV_LOCK();
     if (jl_io_loop) {
@@ -95,7 +95,7 @@ void jl_wait_empty_begin(void)
     }
     JL_UV_UNLOCK();
 }
-void jl_wait_empty_end(void)
+extern void jl_wait_empty_end(void)
 {
     // n.b. caller must be holding jl_uv_mutex
     if (wait_empty_worker.type == UV_TIMER)
@@ -1214,13 +1214,13 @@ struct work_baton {
 #include <sys/syscall.h>
 #endif
 
-void jl_work_wrapper(uv_work_t *req)
+static void jl_work_wrapper(uv_work_t *req)
 {
     struct work_baton *baton = (struct work_baton*) req->data;
     baton->work_func(baton->ccall_fptr, baton->work_args, baton->work_retval);
 }
 
-void jl_work_notifier(uv_work_t *req, int status)
+static void jl_work_notifier(uv_work_t *req, int status)
 {
     struct work_baton *baton = (struct work_baton*) req->data;
     baton->notify_func(baton->notify_idx);

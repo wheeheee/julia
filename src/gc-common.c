@@ -598,7 +598,7 @@ void jl_gc_track_malloced_genericmemory(jl_ptls_t ptls, jl_genericmemory_t *m, i
 // GC Debug
 // =========================================================================== //
 
-int gc_slot_to_fieldidx(void *obj, void *slot, jl_datatype_t *vt) JL_NOTSAFEPOINT
+extern int gc_slot_to_fieldidx(void *obj, void *slot, jl_datatype_t *vt) JL_NOTSAFEPOINT
 {
     int nf = (int)jl_datatype_nfields(vt);
     for (int i = 1; i < nf; i++) {
@@ -608,7 +608,7 @@ int gc_slot_to_fieldidx(void *obj, void *slot, jl_datatype_t *vt) JL_NOTSAFEPOIN
     return nf - 1;
 }
 
-int gc_slot_to_arrayidx(void *obj, void *_slot) JL_NOTSAFEPOINT
+extern int gc_slot_to_arrayidx(void *obj, void *_slot) JL_NOTSAFEPOINT
 {
     char *slot = (char*)_slot;
     jl_datatype_t *vt = (jl_datatype_t*)jl_typeof(obj);

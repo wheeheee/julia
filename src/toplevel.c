@@ -493,7 +493,7 @@ int jl_is_toplevel_only_expr(jl_value_t *e) JL_NOTSAFEPOINT
          ((jl_expr_t*)e)->head == jl_incomplete_sym);
 }
 
-int jl_needs_lowering(jl_value_t *e) JL_NOTSAFEPOINT
+static int jl_needs_lowering(jl_value_t *e) JL_NOTSAFEPOINT
 {
     if (!jl_is_expr(e))
         return 0;

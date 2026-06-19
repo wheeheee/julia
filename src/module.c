@@ -206,7 +206,7 @@ retry:
 }
 
 // find a binding from a module's `usings` list
-struct implicit_search_resolution jl_resolve_implicit_import(jl_binding_t *b, modstack_t *st, size_t world, int trust_cache)
+static struct implicit_search_resolution jl_resolve_implicit_import(jl_binding_t *b, modstack_t *st, size_t world, int trust_cache)
 {
     // First check if we've hit a cycle in this resolution
     {
@@ -1573,7 +1573,7 @@ JL_DLLEXPORT int jl_module_public_p(jl_module_t *m, jl_sym_t *var)
     return b && (jl_atomic_load_relaxed(&b->flags) & BINDING_FLAG_PUBLICP);
 }
 
-uint_t bindingkey_hash(size_t idx, jl_value_t *data)
+extern uint_t bindingkey_hash(size_t idx, jl_value_t *data)
 {
     jl_binding_t *b = (jl_binding_t*)jl_svecref(data, idx); // This must always happen inside the lock
     jl_sym_t *var = b->globalref->name;
@@ -1692,7 +1692,7 @@ JL_DLLEXPORT void jl_set_const(jl_module_t *m, jl_sym_t *var, jl_value_t *val JL
     jl_gc_write(bpart, bpart->restriction, val);
 }
 
-void jl_invalidate_binding_refs(jl_globalref_t *ref, jl_binding_partition_t *invalidated_bpart, jl_binding_partition_t *new_bpart, size_t new_world)
+static void jl_invalidate_binding_refs(jl_globalref_t *ref, jl_binding_partition_t *invalidated_bpart, jl_binding_partition_t *new_bpart, size_t new_world)
 {
     jl_value_t *invalidate_code_for_globalref = NULL;
     if (jl_base_module != NULL)
@@ -2062,7 +2062,7 @@ JL_DLLEXPORT jl_value_t *jl_module_usings(jl_module_t *m)
     return (jl_value_t*)a;
 }
 
-void _append_symbol_to_bindings_array(jl_array_t* a, jl_sym_t *name) {
+static void _append_symbol_to_bindings_array(jl_array_t* a, jl_sym_t *name) {
     jl_array_grow_end(a, 1);
     //XXX: change to jl_arrayset if array storage allocation for Array{Symbols,1} changes:
     jl_array_ptr_set(a, jl_array_dim0(a)-1, (jl_value_t*)name);
@@ -2113,7 +2113,7 @@ static void _materialize_reexported_bindings(jl_module_t *m, size_t world, jl_ar
     }
 }
 
-void append_module_names(jl_array_t* a, jl_module_t *m, int all, int imported, int usings, size_t world)
+static void append_module_names(jl_array_t* a, jl_module_t *m, int all, int imported, int usings, size_t world)
 {
     // Materialize reexported bindings first
     jl_array_t *visited_modules = jl_alloc_vec_any(0);
@@ -2161,7 +2161,7 @@ void append_module_names(jl_array_t* a, jl_module_t *m, int all, int imported, i
     }
 }
 
-void append_exported_names(jl_array_t* a, jl_module_t *m, int all, size_t world)
+static void append_exported_names(jl_array_t* a, jl_module_t *m, int all, size_t world)
 {
     // First, materialize all reexported bindings
     jl_array_t *visited_modules = jl_alloc_vec_any(0);

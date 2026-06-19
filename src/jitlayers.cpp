@@ -655,7 +655,7 @@ static void selectOptLevel(Module &M) JL_NOTSAFEPOINT {
 
 void jl_register_jit_object(const object::ObjectFile &Object,
                             std::function<uint64_t(const StringRef &)> getLoadAddress,
-                            const jl_linker_info_t &Info);
+                            const jl_linker_info_t &Info) JL_NOTSAFEPOINT_ENTER JL_NOTSAFEPOINT_LEAVE;
 
 void JLDebuginfoPlugin::notifyMaterializingWithInfo(
     orc::MaterializationResponsibility &MR, jitlink::LinkGraph &G,
@@ -1024,12 +1024,12 @@ private:
 
 #if defined(LLVM_SHLIB)
 namespace JLEHFrames {
-Error registerEHFrames(orc::ExecutorAddrRange EHFrameSection) {
+static Error registerEHFrames(orc::ExecutorAddrRange EHFrameSection) {
     register_eh_frames(EHFrameSection.Start.toPtr<uint8_t *>(), static_cast<size_t>(EHFrameSection.size()));
     return Error::success();
 }
 
-Error deregisterEHFrames(orc::ExecutorAddrRange EHFrameSection) {
+static Error deregisterEHFrames(orc::ExecutorAddrRange EHFrameSection) {
     deregister_eh_frames(EHFrameSection.Start.toPtr<uint8_t *>(), static_cast<size_t>(EHFrameSection.size()));
     return Error::success();
 }

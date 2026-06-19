@@ -65,7 +65,7 @@ static void jl_delete_thread(void*) JL_NOTSAFEPOINT_ENTER;
 static pthread_key_t jl_task_exit_key;
 static pthread_key_t jl_safe_restore_key;
 
-__attribute__((constructor)) void _jl_init_safe_restore(void)
+static __attribute__((constructor)) void _jl_init_safe_restore(void)
 {
     pthread_key_create(&jl_safe_restore_key, NULL);
     pthread_key_create(&jl_task_exit_key, jl_delete_thread);

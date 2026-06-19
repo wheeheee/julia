@@ -650,7 +650,7 @@ STATIC_INLINE int is_kind_or_anytype(jl_value_t *t) JL_NOTSAFEPOINT
     return jl_is_kind(t) || t == (jl_value_t*)jl_anytype_type;
 }
 
-int obviously_disjoint(jl_value_t *a, jl_value_t *b, int specificity) JL_NOTSAFEPOINT
+extern int obviously_disjoint(jl_value_t *a, jl_value_t *b, int specificity) JL_NOTSAFEPOINT
 {
     if (a == b || a == (jl_value_t*)jl_any_type || b == (jl_value_t*)jl_any_type)
         return 0;
@@ -6090,7 +6090,7 @@ static int num_occurs(jl_tvar_t *v, jl_typeenv_t *env)
     return 0;
 }
 
-int tuple_cmp_typeofbottom(jl_datatype_t *a, jl_datatype_t *b)
+static int tuple_cmp_typeofbottom(jl_datatype_t *a, jl_datatype_t *b)
 {
     size_t i, la = jl_nparams(a), lb = jl_nparams(b);
     for (i = 0; i < la || i < lb; i++) {

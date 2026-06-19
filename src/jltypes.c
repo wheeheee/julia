@@ -619,7 +619,7 @@ static void isort_union(jl_value_t **a, size_t len) JL_NOTSAFEPOINT
     }
 }
 
-static int simple_subtype(jl_value_t *a, jl_value_t *b, int hasfree, int isUnion)
+extern int simple_subtype(jl_value_t *a, jl_value_t *b, int hasfree, int isUnion)
 {
     assert(hasfree == (jl_has_free_typevars(a) | (jl_has_free_typevars(b) << 1)));
     if (a == jl_bottom_type || b == (jl_value_t*)jl_any_type)
@@ -785,7 +785,7 @@ static int simple_subtype2(jl_value_t *a, jl_value_t *b, int hasfree, int isUnio
     return subab | (subba<<1);
 }
 
-jl_value_t *simple_union(jl_value_t *a, jl_value_t *b)
+extern jl_value_t *simple_union(jl_value_t *a, jl_value_t *b)
 {
     size_t nta = count_union_components(&a, 1, 1);
     size_t ntb = count_union_components(&b, 1, 1);
@@ -861,7 +861,7 @@ jl_value_t *simple_union(jl_value_t *a, jl_value_t *b)
 
 int obviously_disjoint(jl_value_t *a, jl_value_t *b, int specificity) JL_NOTSAFEPOINT;
 
-jl_value_t *simple_intersect(jl_value_t *a, jl_value_t *b, int overesi)
+extern jl_value_t *simple_intersect(jl_value_t *a, jl_value_t *b, int overesi)
 {
     // Unlike `Union`, we don't unwrap `UnionAll` here to avoid possible widening.
     size_t nta = count_union_components(&a, 1, 0);
@@ -3160,12 +3160,12 @@ static jl_tvar_t *tvar(const char *name)
                           (jl_value_t*)jl_any_type);
 }
 
-void export_jl_small_typeof(void)
+extern void export_jl_small_typeof(void)
 {
     memcpy(&jl_small_typeof, &ijl_small_typeof, sizeof(jl_small_typeof));
 }
 
-void export_jl_sysimg_globals(void)
+extern void export_jl_sysimg_globals(void)
 {
     // Use jl_dlsym to reference "jl_"#name from the jl_libjulia_handle instead
     // of directly making a symbol from it which will have problems with cpp
@@ -4171,7 +4171,7 @@ static jl_value_t *core(const char *name)
 
 
 // fetch references to things defined in boot.jl
-void post_boot_hooks(void)
+extern void post_boot_hooks(void)
 {
     jl_char_type    = (jl_datatype_t*)core("Char");
     XX(char);

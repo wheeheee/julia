@@ -143,7 +143,7 @@ static int8_t jl_cachearg_offset(void)
 /// ----- Insertion logic for special entries ----- ///
 
 
-uint_t speccache_hash(size_t idx, jl_value_t *data)
+extern uint_t speccache_hash(size_t idx, jl_value_t *data)
 {
     jl_method_instance_t *ml = (jl_method_instance_t*)jl_svecref(data, idx); // This must always happen inside the lock
     jl_value_t *sig = ml->specTypes;
@@ -1674,7 +1674,7 @@ JL_DLLEXPORT jl_typemap_entry_t *jl_mt_find_cache_entry(jl_methcache_t *cache, j
     return mt_find_cache_entry(&cache->cache, &cache->leafcache, tt, world, jl_cachearg_offset());
 }
 
-jl_value_t *compute_simplett(jl_tupletype_t *cachett)
+static jl_value_t *compute_simplett(jl_tupletype_t *cachett)
 {
     // now scan `cachett` and ensure that `Type{T}` in the cache will be matched exactly by `typeof(T)`
     // and also reduce the complexity of rejecting this entry in the cache
@@ -3731,14 +3731,14 @@ JL_DLLEXPORT int jl_method_is_macro(jl_method_t *m)
     return jl_symbol_name(m->name)[0] == '@';
 }
 
-int need_copy_to_mi_cache(jl_method_instance_t *mi, jl_method_instance_t *mi2,
+static int need_copy_to_mi_cache(jl_method_instance_t *mi, jl_method_instance_t *mi2,
     enum internal_compilation_triggers cause)
 {
     return cause == TRIGGER_FOREIGN ||
         !jl_egal((jl_value_t*)mi->sparam_vals, (jl_value_t*)mi2->sparam_vals);
 }
 
-jl_code_instance_t *copy_to_mi_cache(jl_method_instance_t *mi JL_PROPAGATES_ROOT, jl_code_instance_t *codeinst2)
+static jl_code_instance_t *copy_to_mi_cache(jl_method_instance_t *mi JL_PROPAGATES_ROOT, jl_code_instance_t *codeinst2)
 {
     jl_code_instance_t *codeinst = jl_get_method_uninferred(
             mi, codeinst2->rettype,
@@ -4018,7 +4018,7 @@ jl_value_t *jl_fptr_sparam(jl_value_t *f, jl_value_t **args, uint32_t nargs, jl_
     return invoke(f, args, nargs, sparams);
 }
 
-jl_value_t *jl_fptr_wait_for_compiled(jl_value_t *f, jl_value_t **args, uint32_t nargs, jl_code_instance_t *m)
+static jl_value_t *jl_fptr_wait_for_compiled(jl_value_t *f, jl_value_t **args, uint32_t nargs, jl_code_instance_t *m)
 {
     jl_callptr_t invoke = jl_atomic_load_acquire(&m->invoke);
     if (invoke == &jl_fptr_wait_for_compiled) {
@@ -4720,7 +4720,7 @@ jl_value_t *jl_gf_invoke_by_method(jl_method_t *method, jl_value_t *gf, jl_value
     return _jl_invoke(gf, args, nargs - 1, mfunc, world, TRIGGER_INVOKE);
 }
 
-jl_sym_t *jl_gf_supertype_name(jl_sym_t *name)
+static jl_sym_t *jl_gf_supertype_name(jl_sym_t *name)
 {
     size_t l = strlen(jl_symbol_name(name));
     char *prefixed;

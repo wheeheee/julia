@@ -392,7 +392,7 @@ void JITDebugInfoRegistry::registerJITObject(
         delete ObjectCopy;
 }
 
-void jl_register_jit_object(const object::ObjectFile &Object,
+extern void jl_register_jit_object(const object::ObjectFile &Object,
                             std::function<uint64_t(const StringRef &)> getLoadAddress,
                             const jl_linker_info_t &Info) JL_NOTSAFEPOINT_LEAVE JL_NOTSAFEPOINT_ENTER
 {
@@ -1322,7 +1322,7 @@ extern "C" JL_DLLEXPORT_CODEGEN int jl_getFunctionInfo_impl(jl_frame_t **frames_
     return jl_getDylibFunctionInfo(frames_out, pointer, skipC, noInline);
 }
 
-extern "C" jl_code_instance_t *jl_gdblookupci(void *p) JL_NOTSAFEPOINT
+extern "C" JL_DLLEXPORT_CODEGEN jl_code_instance_t *jl_gdblookupci(void *p) JL_NOTSAFEPOINT
 {
     return getJITDebugRegistry().lookupCodeInstance((size_t)p);
 }

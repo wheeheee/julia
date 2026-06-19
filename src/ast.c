@@ -989,7 +989,7 @@ static int is_self_escaping_expr(jl_expr_t *e) JL_NOTSAFEPOINT
 
 // any AST, except those that cannot contain symbols
 // and have no side effects
-int need_esc_node(jl_value_t *e) JL_NOTSAFEPOINT
+static int need_esc_node(jl_value_t *e) JL_NOTSAFEPOINT
 {
     if (jl_is_linenode(e)
         || jl_is_ssavalue(e)

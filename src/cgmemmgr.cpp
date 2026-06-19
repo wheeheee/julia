@@ -943,7 +943,7 @@ class JLJITLinkMemoryManager : public jitlink::JITLinkMemoryManager {
 public:
     class InFlightAlloc;
 
-    static std::unique_ptr<JITLinkMemoryManager> Create()
+    static std::unique_ptr<JITLinkMemoryManager> Create() JL_NOTSAFEPOINT
     {
         auto [ROAlloc, ExeAlloc] = get_preferred_allocators();
         if (ROAlloc && ExeAlloc)
@@ -967,7 +967,7 @@ public:
 
 protected:
     JLJITLinkMemoryManager(std::unique_ptr<ROAllocator> ROAlloc,
-                           std::unique_ptr<ROAllocator> ExeAlloc)
+                           std::unique_ptr<ROAllocator> ExeAlloc) JL_NOTSAFEPOINT
       : ROAlloc(std::move(ROAlloc)), ExeAlloc(std::move(ExeAlloc))
     {
     }
@@ -999,9 +999,11 @@ class JLJITLinkMemoryManager::InFlightAlloc
     jitlink::LinkGraph &G;
 
 public:
-    InFlightAlloc(JLJITLinkMemoryManager &MM, jitlink::LinkGraph &G) : MM(MM), G(G) {}
+    InFlightAlloc(JLJITLinkMemoryManager &MM, jitlink::LinkGraph &G) JL_NOTSAFEPOINT
+        : MM(MM), G(G) {}
 
-    void abandon(OnAbandonedFunction OnAbandoned) override {
+    void abandon(OnAbandonedFunction OnAbandoned) override
+    {
         OnAbandoned(Error::success());
     }
 
@@ -1072,17 +1074,17 @@ void JLJITLinkMemoryManager::allocate(const jitlink::JITLinkDylib *JD,
 }
 }
 
-RTDyldMemoryManager* createRTDyldMemoryManager() JL_NOTSAFEPOINT
+extern RTDyldMemoryManager *createRTDyldMemoryManager() JL_NOTSAFEPOINT
 {
     return new RTDyldMemoryManagerJL();
 }
 
-size_t getRTDyldMemoryManagerTotalBytes(RTDyldMemoryManager *mm) JL_NOTSAFEPOINT
+extern size_t getRTDyldMemoryManagerTotalBytes(RTDyldMemoryManager *mm) JL_NOTSAFEPOINT
 {
     return ((RTDyldMemoryManagerJL*)mm)->getTotalBytes();
 }
 
-std::unique_ptr<jitlink::JITLinkMemoryManager> createJITLinkMemoryManager()
+extern std::unique_ptr<jitlink::JITLinkMemoryManager> createJITLinkMemoryManager() JL_NOTSAFEPOINT
 {
     return JLJITLinkMemoryManager::Create();
 }
