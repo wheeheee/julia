@@ -1605,7 +1605,13 @@ static int subtype_unionall(jl_value_t *t, jl_unionall_t *u, jl_stenv_t *e, int8
         jl_value_t *eff_ub = vb.ub;
         while (jl_is_typevar(eff_ub))
             eff_ub = ((jl_tvar_t*)eff_ub)->ub;
-        int eff_constrained = (vb.occurs_inv || (cov_count(&vb) && u->var->lb == jl_bottom_type));
+        // A var bound only through another variable's declared bounds (BOUND_PROXY)
+        // need not be pinned by every call: matching `Type{<:Tuple{Vararg{E}}}`
+        // against `Type{S} where S<:NInt` reaches `E` through `S`'s bound, but the
+        // `S = Tuple{}` member leaves `E` unbound. So its retained covariant
+        // occurrence count must not mark it defined.
+        int eff_constrained = (vb.occurs_inv ||
+            (cov_count(&vb) && u->var->lb == jl_bottom_type && vb.lb_certainty > BOUND_PROXY));
         if (vb.intvalued && lb == (jl_value_t*)jl_any_type)
             val = (jl_value_t*)jl_wrap_vararg(NULL, NULL, 0, 0); // special token result that represents N::Int in the envout
         else if (!vb.occurs_inv && lb != jl_bottom_type) {
