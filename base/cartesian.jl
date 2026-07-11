@@ -234,7 +234,7 @@ end
     @nif N conditionexpr expr
     @nif N conditionexpr expr elseexpr
 
-Generates a sequence of `if ... elseif ... else ... end` statements. For example:
+Generates a length `N` sequence of `if ... elseif ... else ... end` statements. For example:
 
     @nif 3 d->(i_d > size(A,d)) d->(error("Dimension ", d, " too big")) d->println("All OK")
 
@@ -247,14 +247,35 @@ would generate:
     else
         println("All OK")
     end
-"""
-macro nif(N, condition, operation...)
-    # Handle the final "else"
-    ex = esc(inlineanonymous(length(operation) > 1 ? operation[2] : operation[1], N))
-    # Make the nested if statements
-    for i = N-1:-1:1
-        ex = Expr(:if, esc(inlineanonymous(condition,i)), esc(inlineanonymous(operation[1],i)), ex)
+
+If `elseexpr` is omitted, the last branch becomes `elseif cond ... end`. For example:
+
+    @nif 3 d->(i_d > size(A,d)) d->(error("Dimension ", d, " too big"))
+
+would generate:
+
+    if i_1 > size(A, 1)
+        error("Dimension ", 1, " too big")
+    elseif i_2 > size(A, 2)
+        error("Dimension ", 2, " too big")
+    elseif i_3 > size(A, 3)
+        error("Dimension ", 3, " too big")
     end
+"""
+macro nif(N::Int, condition, operation, else_op=nothing)
+    N > 0 || throw(ArgumentError("There can't be < 1 branch(es) in an if block..."))
+    N == 1 && return Expr(:if, esc(inlineanonymous(condition, 1)), esc(inlineanonymous(operation, 1)))
+    # Handle the final "else" or "elseif"
+    if isnothing(else_op)   # elseif; else_op unspecified
+        ex = Expr(:elseif, esc(inlineanonymous(condition, N)), esc(inlineanonymous(operation, N)))
+    else                    # else; else_op **specified**
+        ex = esc(inlineanonymous(else_op, N))
+    end
+    # Make the elseif statements
+    for i = N-1:-1:2
+        ex = Expr(:elseif, esc(inlineanonymous(condition, i)), esc(inlineanonymous(operation, i)), ex)
+    end
+    ex = Expr(:if, esc(inlineanonymous(condition, 1)), esc(inlineanonymous(operation, 1)), ex)
     ex
 end
 
