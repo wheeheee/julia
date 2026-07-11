@@ -264,18 +264,13 @@ would generate:
 """
 macro nif(N::Int, condition, operation, else_op=nothing)
     N > 0 || throw(ArgumentError("There can't be < 1 branch(es) in an if block..."))
-    N == 1 && return Expr(:if, esc(inlineanonymous(condition, 1)), esc(inlineanonymous(operation, 1)))
-    # Handle the final "else" or "elseif"
-    if isnothing(else_op)   # elseif; else_op unspecified
-        ex = Expr(:elseif, esc(inlineanonymous(condition, N)), esc(inlineanonymous(operation, N)))
-    else                    # else; else_op **specified**
-        ex = esc(inlineanonymous(else_op, N))
-    end
+    # Handle the final "elseif" or "else" respectively
+    tex = N == 1 || isnothing(else_op) ? () : (esc(inlineanonymous(else_op, N)),)
     # Make the elseif statements
-    for i = N-1:-1:2
-        ex = Expr(:elseif, esc(inlineanonymous(condition, i)), esc(inlineanonymous(operation, i)), ex)
+    for i = N-!isnothing(else_op):-1:2
+        tex = (Expr(:elseif, esc(inlineanonymous(condition, i)), esc(inlineanonymous(operation, i)), tex...),)
     end
-    ex = Expr(:if, esc(inlineanonymous(condition, 1)), esc(inlineanonymous(operation, 1)), ex)
+    ex = Expr(:if, esc(inlineanonymous(condition, 1)), esc(inlineanonymous(operation, 1)), tex...)
     ex
 end
 
